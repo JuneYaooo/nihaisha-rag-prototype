@@ -20,6 +20,7 @@ ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_+-]{2,}")
 CHINESE_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
 TERM_SPLIT_RE = re.compile(r"[，,。！？!?；;、\s]+")
 QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}")
+MEASURE_TERM_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:克|钱|兩|两|分|升|斗|斤|铢)")
 FORMULA_SUFFIXES = ("汤", "丸", "散", "饮", "膏", "丹")
 FORMULA_PREFIX_NOISE = (
     "可以讨论",
@@ -53,6 +54,32 @@ SYMPTOM_TERMS = (
     "脉沉",
 )
 CAUTION_TERMS = ("不可", "不可以", "勿", "误", "禁忌", "忌")
+QUERY_EXPANSION_STOP_TERMS = {
+    "这个",
+    "那个",
+    "什么",
+    "怎么",
+    "多少",
+    "现代",
+    "古时",
+    "古时候",
+    "时候",
+    "我们",
+    "他们",
+    "有人",
+    "因为",
+    "所以",
+    "如果",
+    "可以",
+    "就是",
+    "不是",
+    "一样",
+    "一个",
+    "没有",
+    "里面",
+    "现在",
+    "过去",
+}
 KNOWLEDGE_EXTRACTOR_VERSION = "local_rules_v1"
 FORMULA_DOSAGE_SAFETY_NOTICE = (
     "涉及剂量、方药或处方线索时必须谨慎：不同人的体质不同，病情阶段、兼证、年龄、基础病和用药史都不同；"
@@ -205,7 +232,9 @@ def extract_known_terms(text: str, terms: Iterable[str]) -> list[str]:
 
 
 def text_search_terms(query: str) -> list[str]:
-    return dedupe_keep_order(QUERY_TERM_RE.findall(query))
+    terms = QUERY_TERM_RE.findall(query)
+    terms.extend(term.replace(" ", "") for term in MEASURE_TERM_RE.findall(query))
+    return dedupe_keep_order(terms)
 
 
 def knowledge_search_terms(query: str) -> list[str]:
@@ -448,8 +477,11 @@ def extract_knowledge_units_from_paragraph(paragraph: ParsedParagraph) -> list[K
     sentences = split_sentences(text) or [text]
     units: list[KnowledgeUnit] = []
 
-    if "一钱" in text and ("克" in text or "黄金比例" in text or "比例" in text):
-        dosage_evidence = next((sentence for sentence in sentences if "一钱" in sentence), text)
+    if ("一钱" in text or "1钱" in text) and ("克" in text or "黄金比例" in text or "比例" in text):
+        dosage_evidence = next(
+            (sentence for sentence in sentences if "一钱" in sentence or "1钱" in sentence),
+            text,
+        )
         dosage_context_markers = (
             "一钱是",
             "一钱等于",
@@ -465,6 +497,8 @@ def extract_knowledge_units_from_paragraph(paragraph: ParsedParagraph) -> list[K
         local_text = dosage_evidence
         if local_text and len(re.findall(r"\d+(?:\.\d+)?\s*克", local_text)) > 8:
             offset = local_text.find("一钱")
+            if offset < 0:
+                offset = local_text.find("1钱")
             local_text = local_text[max(0, offset - 80) : offset + 120]
         grams = dedupe_keep_order(re.findall(r"\d+(?:\.\d+)?\s*克", local_text))
         object_parts = grams[:]
@@ -2127,12 +2161,76 @@ def expand_answer_query(query: str) -> str:
         parts.append(normalized)
     intent = detect_answer_intent(normalized)
     if intent == "dosage":
-        parts.append("一钱 一钱等于 一钱是多少克 3.75克 4克 5克 3.6克 黄金比例")
+        parts.append("一钱 克 钱 剂量 换算 度量衡 比例 汉制 今制 药房")
     elif intent == "method":
         parts.append("木香饼 热熨 生地木香作饼 神农本草经 结肿成核 乳中结核")
     elif intent == "clinical":
         parts.append("下利 恶心 干呕 黄臭 热利 葛根黄芩黄连汤 黄芩加半夏生姜汤 黄芩汤 半夏泻心汤 生姜泻心汤")
     return " ".join(dedupe_keep_order(parts))
+
+
+def useful_query_terms(text: str, max_terms: int = 24) -> list[str]:
+    terms: list[str] = []
+    terms.extend(MEASURE_TERM_RE.findall(text))
+    for term in text_search_terms(text):
+        normalized = term.strip()
+        if len(normalized) < 2 or normalized in QUERY_EXPANSION_STOP_TERMS:
+            continue
+        if normalized.isdigit():
+            continue
+        terms.append(normalized)
+    return dedupe_keep_order(terms)[:max_terms]
+
+
+def evidence_sentences_for_followup(query: str, results: list[dict[str, object]]) -> list[str]:
+    query_terms = set(useful_query_terms(normalize_query_text(query), max_terms=16))
+    sentences: list[str] = []
+    for result in results[:8]:
+        for sentence in split_sentences(result_evidence_text(result)):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            has_query_term = any(term in sentence for term in query_terms)
+            has_measure = bool(MEASURE_TERM_RE.search(sentence))
+            has_knowledge = any(
+                str(unit.get("unit_type", "")) in sentence
+                for unit in result.get("matched_knowledge_units", []) or []
+            )
+            if has_query_term or has_measure or has_knowledge:
+                sentences.append(sentence)
+    return dedupe_keep_order(sentences)
+
+
+def build_followup_query(query: str, results: list[dict[str, object]], intent: str) -> str:
+    if not results:
+        return ""
+    parts = [query, normalize_query_text(query)]
+    if intent == "dosage":
+        parts.append("剂量 换算 度量衡 比例 克 钱")
+    elif intent == "method":
+        parts.append("出处 原文 治法 材料 方法")
+    elif intent == "clinical":
+        parts.append("方证 鉴别 症状 加减 禁忌")
+
+    for sentence in evidence_sentences_for_followup(query, results):
+        parts.extend(useful_query_terms(sentence, max_terms=16))
+    for result in results[:8]:
+        for unit in result.get("matched_knowledge_units", []) or []:
+            parts.extend(
+                useful_query_terms(
+                    " ".join(
+                        [
+                            str(unit.get("unit_type", "")),
+                            str(unit.get("subject", "")),
+                            str(unit.get("predicate", "")),
+                            str(unit.get("object", "")),
+                            str(unit.get("evidence_quote", "")),
+                        ]
+                    ),
+                    max_terms=12,
+                )
+            )
+    return " ".join(dedupe_keep_order(part for part in parts if part.strip()))
 
 
 def merge_results_by_paragraph(
@@ -2165,6 +2263,75 @@ def merge_results_by_paragraph(
     return sorted(merged.values(), key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
 
+def result_diversity_facets(result: dict[str, object], intent: str = "general") -> set[str]:
+    evidence = result_evidence_text(result)
+    facets: set[str] = {
+        f"source:{Path(str(result.get('source_path', ''))).name}:{result.get('page_start', '')}"
+    }
+    for term in MEASURE_TERM_RE.findall(evidence):
+        facets.add(f"measure:{term.replace(' ', '')}")
+    for term in useful_query_terms(evidence, max_terms=40):
+        if len(term) >= 2:
+            facets.add(f"term:{term}")
+    for unit in result.get("matched_knowledge_units", []) or []:
+        unit_type = str(unit.get("unit_type", ""))
+        subject = str(unit.get("subject", ""))
+        predicate = str(unit.get("predicate", ""))
+        object_text = str(unit.get("object", ""))
+        if unit_type:
+            facets.add(f"unit:{unit_type}")
+        if subject:
+            facets.add(f"subject:{subject}")
+        if predicate:
+            facets.add(f"predicate:{predicate}")
+        for term in useful_query_terms(object_text, max_terms=12):
+            facets.add(f"object:{term}")
+    if intent != "general":
+        facets.add(f"intent:{intent}")
+    return facets
+
+
+def select_diverse_results(
+    results: list[dict[str, object]],
+    limit: int,
+    intent: str = "general",
+) -> list[dict[str, object]]:
+    if limit <= 0 or len(results) <= limit:
+        return results[:limit]
+
+    remaining = sorted(results, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    max_score = max(float(item.get("score", 0.0)) for item in remaining) or 1.0
+    selected: list[dict[str, object]] = []
+    covered_facets: set[str] = set()
+
+    while remaining and len(selected) < limit:
+        best_index = 0
+        best_score = -1.0
+        for index, candidate in enumerate(remaining):
+            facets = result_diversity_facets(candidate, intent=intent)
+            new_facets = facets - covered_facets
+            new_measures = {facet for facet in new_facets if facet.startswith("measure:")}
+            relevance = float(candidate.get("score", 0.0)) / max_score
+            novelty = min(len(new_facets), 12) / 12
+            measure_bonus = 0.0
+            if intent == "dosage":
+                measure_bonus = 0.35 * min(len(new_measures), 3)
+            source_bonus = 0.08 if not any(
+                Path(str(item.get("source_path", ""))).name
+                == Path(str(candidate.get("source_path", ""))).name
+                for item in selected
+            ) else 0.0
+            candidate_score = relevance + 0.45 * novelty + measure_bonus + source_bonus
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_index = index
+        chosen = remaining.pop(best_index)
+        selected.append(chosen)
+        covered_facets.update(result_diversity_facets(chosen, intent=intent))
+
+    return selected
+
+
 def citation_label(result: dict[str, object]) -> str:
     source_name = Path(str(result.get("source_path", ""))).name
     page_start = result.get("page_start", "")
@@ -2173,19 +2340,35 @@ def citation_label(result: dict[str, object]) -> str:
     return f"{source_name} {page}".strip()
 
 
+def dosage_evidence_snippet(text: str, max_chars: int = 520) -> str:
+    if len(text) <= max_chars:
+        return text
+    anchor_offsets = [offset for offset in (text.find("一钱"), text.find("1钱")) if offset >= 0]
+    gram_match = MEASURE_TERM_RE.search(text)
+    offsets = anchor_offsets[:]
+    if gram_match is not None:
+        offsets.append(gram_match.start())
+    if not offsets:
+        return evidence_quote(text, max_chars=max_chars)
+    center = min(offsets)
+    start = max(0, center - 60)
+    end = min(len(text), center + max_chars - 10)
+    return evidence_quote(text[start:end], max_chars=max_chars)
+
+
 def citation_evidence_for_result(result: dict[str, object], intent: str = "general") -> str:
     if intent == "dosage":
         evidence_parts: list[str] = []
+        for sentence in split_sentences(str(result.get("text", ""))):
+            if ("一钱" in sentence or "1钱" in sentence) and ("克" in sentence or "比例" in sentence):
+                evidence_parts.append(sentence)
         for unit in result.get("matched_knowledge_units", []) or []:
             quote = str(unit.get("evidence_quote", "")).strip()
-            if "一钱" in quote or "克" in quote:
+            if "一钱" in quote or "1钱" in quote or "克" in quote:
                 evidence_parts.append(quote)
-        for sentence in split_sentences(str(result.get("text", ""))):
-            if "一钱" in sentence and ("克" in sentence or "比例" in sentence):
-                evidence_parts.append(sentence)
         evidence = " ".join(dedupe_keep_order(evidence_parts))
         if evidence:
-            return evidence_quote(evidence, max_chars=360)
+            return dosage_evidence_snippet(evidence)
 
     knowledge_units = result.get("matched_knowledge_units", []) or []
     if knowledge_units:
@@ -2242,19 +2425,7 @@ def result_evidence_text(result: dict[str, object]) -> str:
 
 def filter_results_for_intent(intent: str, results: list[dict[str, object]]) -> list[dict[str, object]]:
     if intent == "dosage":
-        dosage_markers = (
-            "一钱等于",
-            "一钱是",
-            "一钱约",
-            "等于多少克",
-            "剂量换算",
-            "换算一钱",
-        )
-        filtered = [
-            result
-            for result in results
-            if any(marker in result_evidence_text(result) for marker in dosage_markers)
-        ]
+        filtered = [result for result in results if is_dosage_relevant_result(result)]
     elif intent == "method":
         filtered = [
             result
@@ -2267,6 +2438,23 @@ def filter_results_for_intent(intent: str, results: list[dict[str, object]]) -> 
     else:
         filtered = results
     return filtered or results
+
+
+def is_dosage_relevant_result(result: dict[str, object]) -> bool:
+    text = result_evidence_text(result)
+    has_anchor = "一钱" in text or "1钱" in text
+    has_measure = bool(MEASURE_TERM_RE.search(text))
+    has_context = any(term in text for term in ("剂量", "换算", "度量衡", "比例", "汉制", "今制"))
+    if "大约一钱的量" in text or "大约1钱的量" in text:
+        return has_context and "比例" in text
+    if has_anchor and (has_measure or has_context):
+        return True
+    if "比例" in text and any(term in text for term in ("方", "汤", "剂量", "处方")):
+        return True
+    return any(
+        unit.get("unit_type") == "dosage"
+        for unit in result.get("matched_knowledge_units", []) or []
+    )
 
 
 def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2291,21 +2479,50 @@ def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[di
 
 
 def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
+    def extract_conversion_values(text: str) -> list[str]:
+        values: list[str] = []
+        anchor_patterns = (
+            r"(?:一钱|1钱)\s*(?:等于|是|约|算|当|大概|大约)?\s*(\d+(?:\.\d+)?\s*克)",
+            r"(?:一钱|1钱)[^。！？!?；;，,]{0,16}?(\d+(?:\.\d+)?\s*克)",
+        )
+        for pattern in anchor_patterns:
+            values.extend(re.findall(pattern, text))
+        if ("一钱的量" in text or "1钱的量" in text) and any(
+            marker in text for marker in ("也就是说", "按照比例", "加起来是")
+        ):
+            anchor_offsets = [offset for offset in (text.find("一钱的量"), text.find("1钱的量")) if offset >= 0]
+            if anchor_offsets:
+                anchor_offset = min(anchor_offsets)
+                values.extend(re.findall(r"\d+(?:\.\d+)?\s*克", text[anchor_offset:]))
+
+        for marker in ("误解成", "当作", "算作"):
+            offset = text.find(marker)
+            if offset >= 0:
+                fragment = re.split(r"[，,。！？!?；;]", text[offset:], maxsplit=1)[0]
+                values.extend(re.findall(r"\d+(?:\.\d+)?\s*克", fragment))
+        return dedupe_keep_order(values)
+
     def is_conversion_context(text: str) -> bool:
         markers = (
             "一钱等于",
+            "1钱等于",
             "一钱是",
+            "1钱是",
             "一钱约",
+            "1钱约",
             "一钱算",
+            "1钱算",
             "等于多少克",
             "换算",
             "剂量换算",
         )
         if any(marker in text for marker in markers):
             return True
-        if "大约一钱的量" in text or "一钱的量" in text:
+        if ("大约一钱的量" in text or "一钱的量" in text or "大约1钱的量" in text or "1钱的量" in text) and not any(
+            marker in text for marker in ("也就是说", "按照比例", "加起来是")
+        ):
             return False
-        return "一钱" in text and "克" in text
+        return ("一钱" in text or "1钱" in text) and "克" in text
 
     values: list[str] = []
     for unit in collect_matched_knowledge_units(results):
@@ -2314,13 +2531,13 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
         context = f"{unit.get('object', '')}\n{unit.get('evidence_quote', '')}"
         if not is_conversion_context(context):
             continue
-        values.extend(re.findall(r"\d+(?:\.\d+)?\s*克", str(unit.get("object", ""))))
-        values.extend(re.findall(r"\d+(?:\.\d+)?\s*克", str(unit.get("evidence_quote", ""))))
+        values.extend(extract_conversion_values(str(unit.get("object", ""))))
+        values.extend(extract_conversion_values(str(unit.get("evidence_quote", ""))))
     for result in results:
         text = str(result.get("text", ""))
         for sentence in split_sentences(text):
             if is_conversion_context(sentence):
-                values.extend(re.findall(r"\d+(?:\.\d+)?\s*克", sentence))
+                values.extend(extract_conversion_values(sentence))
     return dedupe_keep_order(values)
 
 
@@ -2352,13 +2569,14 @@ def synthesize_pdf_rag_answer(
 ) -> dict[str, object]:
     intent = detect_answer_intent(query)
     relevant_results = filter_results_for_intent(intent, results)
-    effective_max_citations = 3 if intent == "dosage" else max_citations
+    effective_max_citations = max_citations
     citations = build_citations(
         relevant_results,
         max_citations=effective_max_citations,
         intent=intent,
     )
-    citation_refs = "、".join(f"[{citation['index']}]" for citation in citations[:3])
+    cited = citations if intent == "dosage" else citations[:3]
+    citation_refs = "、".join(f"[{citation['index']}]" for citation in cited)
 
     if not results:
         return {
@@ -2374,9 +2592,9 @@ def synthesize_pdf_rag_answer(
         gram_text = "、".join(grams) if grams else "检索结果中未形成稳定克数列表"
         answer = (
             f"根据当前 PDF 原文证据，“一钱”的说法不是单一固定值，已检索到：{gram_text}。"
-            f"其中部分资料明确提到“南宁讲一钱等于3.75克、人纪教程约等于5克”，"
-            f"也有课程段落提到一钱按5克或3.6克的说法。证据见 {citation_refs}。"
-            "课程资料同时反复强调剂量还要看方中比例和语境，不能只抽出一个克数孤立使用。"
+            f"证据见 {citation_refs}。"
+            "课程资料同时提示古今度量衡、抓药语境、煎煮方法和方中比例都会影响理解，"
+            "不能只抽出一个克数孤立使用。"
         )
         safety_notice = with_formula_dosage_safety("这是课程资料整理和出处检索，不是个人用药剂量建议。")
     elif intent == "method":
@@ -2521,11 +2739,28 @@ def answer_pdf_rag(
         )
         store = LocalVectorStore(db_path, embedding_backend=backend)
     search_query = expand_answer_query(query)
-    results = store.search(search_query, limit=limit, mode=mode)
+    candidate_limit = max(limit * 4, 16)
+    results = store.search(search_query, limit=candidate_limit, mode=mode)
     intent = detect_answer_intent(query)
     if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
-        knowledge_results = store.search_knowledge_units(search_query, limit=limit)
-        results = merge_results_by_paragraph(results, knowledge_results)[:limit]
+        knowledge_results = store.search_knowledge_units(search_query, limit=candidate_limit)
+        results = merge_results_by_paragraph(results, knowledge_results)
+    followup_query = build_followup_query(query, results, intent)
+    if followup_query and followup_query != search_query:
+        followup_limit = max(limit * 4, 12)
+        followup_results = store.search(followup_query, limit=followup_limit, mode=mode)
+        if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
+            followup_knowledge_results = store.search_knowledge_units(
+                followup_query,
+                limit=followup_limit,
+            )
+            followup_results = merge_results_by_paragraph(
+                followup_results,
+                followup_knowledge_results,
+            )
+        results = merge_results_by_paragraph(results, followup_results)
+    intent_results = filter_results_for_intent(intent, results)
+    results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
     answer["composer"] = "template"
     if composer == "template":
