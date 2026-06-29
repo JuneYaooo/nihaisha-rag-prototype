@@ -17,6 +17,7 @@ from nihaisha_kg.pdf_vector import (
     SiliconFlowChatBackend,
     answer_pdf_rag,
     augment_pdf_vector_store_questions,
+    build_query_plan,
     compose_pdf_rag_answer_with_llm,
     expand_answer_query,
     extract_knowledge_units_from_paragraph,
@@ -30,6 +31,8 @@ from nihaisha_kg.pdf_vector import (
     pack_dense_vector,
     pack_sparse_vector,
     parse_unit_types,
+    reciprocal_rank_fuse,
+    run_query_plan_search,
     split_sentences,
     sparse_dot,
     unpack_dense_vector,
@@ -289,6 +292,114 @@ class PdfVectorTests(unittest.TestCase):
         self.assertNotIn("3.75克", expanded)
         self.assertNotIn("3.6克", expanded)
         self.assertNotIn("5克", expanded)
+
+    def test_build_query_plan_creates_multiple_generic_retrieval_queries(self) -> None:
+        plan = build_query_plan("古时候的一钱，是现代的多少克？", intent="dosage")
+
+        self.assertGreaterEqual(len(plan), 3)
+        self.assertEqual(plan[0], "古时候的一钱，是现代的多少克？")
+        self.assertTrue(any("剂量" in query and "换算" in query for query in plan))
+        self.assertTrue(any("古时候" not in query and "一钱" in query for query in plan[1:]))
+        joined_plan = "\n".join(plan)
+        self.assertNotIn("3.75克", joined_plan)
+        self.assertNotIn("3.6克", joined_plan)
+        self.assertNotIn("5克", joined_plan)
+
+    def test_query_plan_can_add_evidence_derived_followup_queries(self) -> None:
+        seed_results = [
+            {
+                "paragraph_id": "p-a",
+                "title": "剂量 p1",
+                "source_path": "/tmp/a.pdf",
+                "page_start": 1,
+                "page_end": 1,
+                "text": "一钱是5克，也有人说一钱是3.6克，古今度量衡不同，还要看比例。",
+                "matched_knowledge_units": [
+                    {
+                        "unit_type": "dosage",
+                        "subject": "一钱",
+                        "predicate": "换算与剂量原则",
+                        "object": "5克",
+                        "evidence_quote": "一钱是5克，也有人说一钱是3.6克。",
+                    }
+                ],
+            }
+        ]
+
+        plan = build_query_plan("古时候的一钱，是现代的多少克？", intent="dosage", seed_results=seed_results)
+
+        self.assertGreaterEqual(len(plan), 5)
+        self.assertTrue(any("5克" in query or "3.6克" in query for query in plan))
+        self.assertTrue(any("度量衡" in query and "比例" in query for query in plan))
+
+    def test_reciprocal_rank_fuse_promotes_results_seen_across_query_rewrites(self) -> None:
+        result_a = {
+            "paragraph_id": "p-a",
+            "score": 10.0,
+            "vector_score": 0.0,
+            "text_score": 10.0,
+            "knowledge_score": 0.0,
+            "retrieval_sources": ["text"],
+            "matched_knowledge_units": [],
+            "matched_units": [],
+        }
+        result_b_low_first = {
+            "paragraph_id": "p-b",
+            "score": 1.0,
+            "vector_score": 0.0,
+            "text_score": 1.0,
+            "knowledge_score": 0.0,
+            "retrieval_sources": ["text"],
+            "matched_knowledge_units": [],
+            "matched_units": [],
+        }
+        result_b_high_second = dict(result_b_low_first, score=8.0, text_score=8.0)
+
+        fused = reciprocal_rank_fuse(
+            [
+                [result_a, result_b_low_first],
+                [result_b_high_second],
+            ],
+            limit=2,
+            rank_constant=10,
+        )
+
+        self.assertEqual(fused[0]["paragraph_id"], "p-b")
+        self.assertIn("rrf_score", fused[0])
+
+    def test_run_query_plan_search_executes_distinct_queries_and_fuses_results(self) -> None:
+        class FakeStore:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, int]] = []
+
+            def search(self, query: str, limit: int, mode: str) -> list[dict[str, object]]:
+                self.calls.append((mode, query, limit))
+                paragraph_id = "p-shared" if "度量衡" in query or "一钱" in query else "p-other"
+                return [
+                    {
+                        "paragraph_id": paragraph_id,
+                        "score": 1.0,
+                        "vector_score": 0.0,
+                        "text_score": 1.0,
+                        "knowledge_score": 0.0,
+                        "retrieval_sources": ["text"],
+                        "matched_knowledge_units": [],
+                        "matched_units": [],
+                    }
+                ]
+
+            def search_knowledge_units(self, query: str, limit: int) -> list[dict[str, object]]:
+                self.calls.append(("knowledge", query, limit))
+                return []
+
+        store = FakeStore()
+        plan = ["原始问题", "一钱 剂量", "度量衡 比例"]
+
+        results = run_query_plan_search(store, plan, limit=3, mode="hybrid", intent="dosage")
+
+        searched_queries = [call[1] for call in store.calls if call[0] == "hybrid"]
+        self.assertEqual(searched_queries, plan)
+        self.assertEqual(results[0]["paragraph_id"], "p-shared")
 
     def test_answer_pdf_rag_runs_followup_search_for_diverse_dosage_evidence(self) -> None:
         seed = ParsedParagraph(

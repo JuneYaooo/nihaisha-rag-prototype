@@ -2233,6 +2233,67 @@ def build_followup_query(query: str, results: list[dict[str, object]], intent: s
     return " ".join(dedupe_keep_order(part for part in parts if part.strip()))
 
 
+def intent_query_terms(intent: str) -> str:
+    if intent == "dosage":
+        return "一钱 克 钱 剂量 换算 度量衡 比例 汉制 今制 药房"
+    if intent == "method":
+        return "出处 原文 治法 材料 方法 来源"
+    if intent == "clinical":
+        return "方证 鉴别 症状 加减 禁忌 表证 里证 寒热 虚实"
+    return ""
+
+
+def build_query_plan(
+    query: str,
+    intent: str | None = None,
+    seed_results: list[dict[str, object]] | None = None,
+    max_queries: int = 8,
+) -> list[str]:
+    normalized = normalize_query_text(query)
+    resolved_intent = intent or detect_answer_intent(normalized)
+    planned: list[str] = [query]
+    if normalized != query:
+        planned.append(normalized)
+
+    query_terms = useful_query_terms(normalized, max_terms=12)
+    if query_terms:
+        planned.append(" ".join(query_terms))
+
+    intent_terms = intent_query_terms(resolved_intent)
+    if intent_terms:
+        planned.append(intent_terms)
+
+    if seed_results:
+        evidence_queries: list[str] = []
+        for sentence in evidence_sentences_for_followup(query, seed_results):
+            terms = useful_query_terms(sentence, max_terms=10)
+            if terms:
+                evidence_queries.append(" ".join(terms))
+
+        kg_terms: list[str] = []
+        for result in seed_results[:8]:
+            for unit in result.get("matched_knowledge_units", []) or []:
+                kg_terms.extend(
+                    useful_query_terms(
+                        " ".join(
+                            [
+                                str(unit.get("unit_type", "")),
+                                str(unit.get("subject", "")),
+                                str(unit.get("predicate", "")),
+                                str(unit.get("object", "")),
+                                str(unit.get("evidence_quote", "")),
+                            ]
+                        ),
+                        max_terms=10,
+                    )
+                )
+        if kg_terms:
+            planned.append(" ".join(dedupe_keep_order(kg_terms)[:16]))
+        planned.extend(evidence_queries[:4])
+
+    return dedupe_keep_order(part.strip() for part in planned if part.strip())[:max_queries]
+
+
 def merge_results_by_paragraph(
     primary: list[dict[str, object]],
     secondary: list[dict[str, object]],
@@ -2261,6 +2322,82 @@ def merge_results_by_paragraph(
         current.setdefault("matched_units", [])
         current["matched_units"].extend(result.get("matched_units", []))
     return sorted(merged.values(), key=lambda item: float(item.get("score", 0.0)), reverse=True)
+
+
+def reciprocal_rank_fuse(
+    result_sets: list[list[dict[str, object]]],
+    limit: int,
+    rank_constant: int = 60,
+) -> list[dict[str, object]]:
+    fused: dict[str, dict[str, object]] = {}
+    for results in result_sets:
+        for rank, result in enumerate(results, start=1):
+            paragraph_id = str(result.get("paragraph_id", ""))
+            if not paragraph_id:
+                continue
+            rrf_increment = 1.0 / (rank_constant + rank)
+            current = fused.get(paragraph_id)
+            if current is None:
+                item = dict(result)
+                item["raw_score"] = float(result.get("score", 0.0))
+                item["rrf_score"] = rrf_increment
+                item["score"] = rrf_increment
+                item["retrieval_sources"] = sorted(set(item.get("retrieval_sources", [])))
+                item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
+                item["matched_units"] = list(item.get("matched_units", []))
+                fused[paragraph_id] = item
+                continue
+
+            current["raw_score"] = max(
+                float(current.get("raw_score", current.get("score", 0.0))),
+                float(result.get("score", 0.0)),
+            )
+            current["rrf_score"] = float(current.get("rrf_score", 0.0)) + rrf_increment
+            current["score"] = float(current["rrf_score"])
+            current["vector_score"] = max(
+                float(current.get("vector_score", 0.0)),
+                float(result.get("vector_score", 0.0)),
+            )
+            current["text_score"] = max(
+                float(current.get("text_score", 0.0)),
+                float(result.get("text_score", 0.0)),
+            )
+            current["knowledge_score"] = max(
+                float(current.get("knowledge_score", 0.0)),
+                float(result.get("knowledge_score", 0.0)),
+            )
+            sources = set(current.get("retrieval_sources", []))
+            sources.update(result.get("retrieval_sources", []))
+            current["retrieval_sources"] = sorted(sources)
+            current.setdefault("matched_knowledge_units", [])
+            current["matched_knowledge_units"].extend(result.get("matched_knowledge_units", []))
+            current.setdefault("matched_units", [])
+            current["matched_units"].extend(result.get("matched_units", []))
+
+    ranked = sorted(
+        fused.values(),
+        key=lambda item: (float(item.get("rrf_score", 0.0)), float(item.get("raw_score", 0.0))),
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
+def run_query_plan_search(
+    store: object,
+    query_plan: list[str],
+    limit: int,
+    mode: str,
+    intent: str,
+) -> list[dict[str, object]]:
+    per_query_limit = max(limit * 2, 8)
+    result_sets: list[list[dict[str, object]]] = []
+    for planned_query in query_plan:
+        results = store.search(planned_query, limit=per_query_limit, mode=mode)
+        if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
+            knowledge_results = store.search_knowledge_units(planned_query, limit=per_query_limit)
+            results = merge_results_by_paragraph(results, knowledge_results)
+        result_sets.append(results)
+    return reciprocal_rank_fuse(result_sets, limit=max(limit * 4, 16))
 
 
 def result_diversity_facets(result: dict[str, object], intent: str = "general") -> set[str]:
@@ -2738,27 +2875,30 @@ def answer_pdf_rag(
             batch_size=batch_size,
         )
         store = LocalVectorStore(db_path, embedding_backend=backend)
-    search_query = expand_answer_query(query)
     candidate_limit = max(limit * 4, 16)
-    results = store.search(search_query, limit=candidate_limit, mode=mode)
     intent = detect_answer_intent(query)
-    if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
-        knowledge_results = store.search_knowledge_units(search_query, limit=candidate_limit)
-        results = merge_results_by_paragraph(results, knowledge_results)
-    followup_query = build_followup_query(query, results, intent)
-    if followup_query and followup_query != search_query:
-        followup_limit = max(limit * 4, 12)
-        followup_results = store.search(followup_query, limit=followup_limit, mode=mode)
-        if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
-            followup_knowledge_results = store.search_knowledge_units(
-                followup_query,
-                limit=followup_limit,
-            )
-            followup_results = merge_results_by_paragraph(
-                followup_results,
-                followup_knowledge_results,
-            )
-        results = merge_results_by_paragraph(results, followup_results)
+    initial_plan = build_query_plan(query, intent=intent)
+    results = run_query_plan_search(
+        store,
+        initial_plan,
+        limit=candidate_limit,
+        mode=mode,
+        intent=intent,
+    )
+    followup_plan = [
+        planned_query
+        for planned_query in build_query_plan(query, intent=intent, seed_results=results)
+        if planned_query not in initial_plan
+    ]
+    if followup_plan:
+        followup_results = run_query_plan_search(
+            store,
+            followup_plan,
+            limit=candidate_limit,
+            mode=mode,
+            intent=intent,
+        )
+        results = reciprocal_rank_fuse([results, followup_results], limit=max(candidate_limit * 2, 32))
     intent_results = filter_results_for_intent(intent, results)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
