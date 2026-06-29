@@ -18,6 +18,7 @@ from nihaisha_kg.pdf_vector import (
     answer_pdf_rag,
     augment_pdf_vector_store_questions,
     compose_pdf_rag_answer_with_llm,
+    expand_answer_query,
     extract_knowledge_units_from_paragraph,
     synthesize_pdf_rag_answer,
     write_build_traces,
@@ -277,6 +278,74 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("不同人的体质不同", answer["safety_notice"])
         self.assertIn("不要私自购药", answer["safety_notice"])
         self.assertIn("线下正规中医", answer["safety_notice"])
+
+    def test_dosage_query_expansion_uses_generic_terms_not_fixed_answer_values(self) -> None:
+        expanded = expand_answer_query("古时候的一钱，是现代的多少克？")
+
+        self.assertIn("剂量", expanded)
+        self.assertIn("换算", expanded)
+        self.assertIn("度量衡", expanded)
+        self.assertIn("比例", expanded)
+        self.assertNotIn("3.75克", expanded)
+        self.assertNotIn("3.6克", expanded)
+        self.assertNotIn("5克", expanded)
+
+    def test_answer_pdf_rag_runs_followup_search_for_diverse_dosage_evidence(self) -> None:
+        seed = ParsedParagraph(
+            paragraph_id="p-seed",
+            doc_id="doc",
+            source_path="/tmp/伤寒.pdf",
+            title="伤寒 p25",
+            page_start=25,
+            page_end=25,
+            text="一钱是5克，也有人说一钱是3.6克，古今度量衡不同，不要斤斤计较，还要看比例。",
+        )
+        conversion = ParsedParagraph(
+            paragraph_id="p-conversion",
+            doc_id="doc",
+            source_path="/tmp/本草.pdf",
+            title="本草 p20",
+            page_start=20,
+            page_end=20,
+            text="中国用克，几克几克，看不懂，大概1钱3.3克，有尾数的3.3克，差个1克2克，误解成4克5克，这一点点倒无所谓，1克的剂量差不了多少。",
+        )
+        ratio = ParsedParagraph(
+            paragraph_id="p-ratio",
+            doc_id="doc",
+            source_path="/tmp/伤寒.pdf",
+            title="伤寒 p49",
+            page_start=49,
+            page_end=49,
+            text="所以黄金比例，就是4：3：2：2，黄金比例很重要。葛根汤重用葛根，再来重用麻黄。",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.insert_paragraphs([seed, conversion, ratio])
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+
+            answer = answer_pdf_rag(
+                "古时候的一钱，是现代的多少克？",
+                db_path=db_path,
+                mode="text",
+                limit=3,
+            )
+
+        citation_text = "\n".join(str(citation["evidence_quote"]) for citation in answer["citations"])
+        self.assertIn("3.3克", answer["answer"])
+        self.assertIn("3.6克", answer["answer"])
+        self.assertIn("5克", answer["answer"])
+        self.assertNotIn("1克", answer["answer"])
+        self.assertNotIn("2克", answer["answer"])
+        self.assertIn("3.3克", citation_text)
+        self.assertIn("黄金比例", citation_text)
+        self.assertEqual(
+            {"p-seed", "p-conversion", "p-ratio"},
+            {str(citation["paragraph_id"]) for citation in answer["citations"]},
+        )
 
     def test_answer_pdf_rag_returns_clinical_safety_boundary(self) -> None:
         paragraph = ParsedParagraph(
