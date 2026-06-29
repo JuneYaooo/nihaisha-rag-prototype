@@ -12,6 +12,7 @@ from nihaisha_kg.pdf_vector import (
     LocalBgeM3EmbeddingBackend,
     LocalVectorStore,
     ParsedParagraph,
+    RetrievalUnit,
     SiliconFlowEmbeddingBackend,
     SiliconFlowChatBackend,
     answer_pdf_rag,
@@ -635,6 +636,53 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("unit_id", json.loads(mapping_lines[0]))
         self.assertTrue(index_exists)
 
+    def test_build_faiss_vector_index_keeps_vectors_unweighted(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a",
+            doc_id="doc",
+            source_path="/tmp/doc.pdf",
+            title="桂枝汤证",
+            page_start=1,
+            page_end=1,
+            text="太阳中风，汗出恶风，桂枝汤主之。",
+        )
+        unit = RetrievalUnit(
+            unit_id="u-a",
+            paragraph_id="p-a",
+            doc_id="doc",
+            unit_type="sentence",
+            text="桂枝汤",
+            text_for_embedding="桂枝汤",
+            sentence_start=0,
+            sentence_end=0,
+            weight=3.0,
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = base / "rag.sqlite"
+            index_path = base / "vectors.faiss"
+            store = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units([unit])
+            build_faiss_vector_index(
+                db_path,
+                index_path=index_path,
+                ids_path=base / "vector_ids.jsonl",
+                faiss_module=fake_faiss,
+            )
+            indexed_vector = fake_faiss.indexes[str(index_path)].vectors[0]
+
+        self.assertEqual(indexed_vector, [1.0, 0.0])
+
     def test_vector_search_uses_faiss_index_when_available(self) -> None:
         paragraph_a = ParsedParagraph(
             paragraph_id="p-a",
@@ -688,6 +736,34 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["paragraph_id"], "p-a")
         self.assertIn("faiss", results[0]["retrieval_sources"])
         self.assertGreater(results[0]["vector_score"], 0)
+
+    def test_vector_search_rejects_embedding_kind_mismatch(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a",
+            doc_id="doc",
+            source_path="/tmp/doc.pdf",
+            title="桂枝汤证",
+            page_start=1,
+            page_end=1,
+            text="太阳中风，汗出恶风，桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(build_retrieval_units([paragraph], window_size=2, overlap=1))
+
+            mismatched_store = LocalVectorStore(db_path, embedding_backend=create_embedding_backend("sparse"))
+            with self.assertRaisesRegex(RuntimeError, "vector_kind mismatch"):
+                mismatched_store.search_vector("桂枝汤", limit=1)
 
     def test_rebuild_text_index_is_idempotent(self) -> None:
         paragraph = ParsedParagraph(

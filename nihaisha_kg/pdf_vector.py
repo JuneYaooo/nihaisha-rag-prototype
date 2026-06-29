@@ -1061,8 +1061,7 @@ def build_faiss_vector_index(
                 vectors: list[list[float]] = []
                 for row in rows:
                     vector = unpack_dense_vector(row["vector_blob"])
-                    weight = float(row["weight"])
-                    vectors.append([float(value) * weight for value in vector])
+                    vectors.append(vector)
                     ids_file.write(json.dumps({"unit_id": row["unit_id"]}, ensure_ascii=False) + "\n")
                 index.add(faiss_matrix(vectors))
                 total += len(rows)
@@ -1537,13 +1536,21 @@ class LocalVectorStore:
         unit_limit: int = 80,
         faiss_module: object | None = None,
     ) -> list[dict[str, object]]:
+        vector_kind = self.embedding_backend.vector_kind
+        stored_vector_kind = self.read_meta().get("vector_kind")
+        if stored_vector_kind and stored_vector_kind != vector_kind:
+            raise RuntimeError(
+                "vector_kind mismatch: "
+                f"database uses {stored_vector_kind}, but embedding backend produces {vector_kind}. "
+                "Use the same embedding family that built the database, for example "
+                "`--embedding siliconflow` with BAAI/bge-m3 or `--embedding local-bge-m3`."
+            )
         query_vectors = self.embedding_backend.embed_texts([query])
         if not query_vectors:
             return []
         query_vector = query_vectors[0]
         if not query_vector:
             return []
-        vector_kind = self.embedding_backend.vector_kind
         dense_query_vector = normalize_dense_vector(query_vector) if vector_kind == "dense" else None
         hits: list[tuple[float, sqlite3.Row]] = []
         with self.connect() as conn:
@@ -1618,7 +1625,7 @@ class LocalVectorStore:
         ).fetchall()
         row_by_id = {row["unit_id"]: row for row in rows}
         hits = [
-            (score, row_by_id[unit_id])
+            (score * float(row_by_id[unit_id]["weight"]), row_by_id[unit_id])
             for score, unit_id in scored_unit_ids
             if unit_id in row_by_id
         ]
