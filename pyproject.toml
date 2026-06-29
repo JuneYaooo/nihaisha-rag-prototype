@@ -19,5 +19,8 @@ local = [
 [project.scripts]
 nihaisha-rag = "nihaisha_kg.cli:main"
 
+[tool.setuptools]
+packages = ["nihaisha_kg"]
+
 [tool.ruff]
 line-length = 100
