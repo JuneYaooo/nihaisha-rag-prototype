@@ -1,0 +1,6 @@
+interface:
+  display_name: "Nihaisha RAG"
+  short_description: "倪海厦 PDF 知识图谱与向量检索"
+  default_prompt: "Use $nihaisha-rag-prototype to answer 倪海厦 PDF course questions with source-grounded citations."
+policy:
+  allow_implicit_invocation: true

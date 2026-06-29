@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.venv/
+
+# Keep the final prototype database, but ignore accidental extra builds.
+data/*
+!data/pdf_rag_bge_m3/
+data/pdf_rag_bge_m3/*
+!data/pdf_rag_bge_m3/rag.sqlite
+!data/pdf_rag_bge_m3/manifest.json
+!data/pdf_rag_bge_m3/vectors.faiss
+!data/pdf_rag_bge_m3/vector_ids.jsonl

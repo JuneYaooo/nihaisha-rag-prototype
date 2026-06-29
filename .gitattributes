@@ -1,0 +1,2 @@
+data/pdf_rag_bge_m3/rag.sqlite filter=lfs diff=lfs merge=lfs -text
+data/pdf_rag_bge_m3/vectors.faiss filter=lfs diff=lfs merge=lfs -text

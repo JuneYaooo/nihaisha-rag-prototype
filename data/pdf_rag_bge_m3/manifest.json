@@ -1,0 +1,105 @@
+{
+  "pdf_dir": "/Users/june/code/data/nihaisha_deeliu/nihaisha",
+  "store": "data/pdf_rag_bge_m3/rag.sqlite",
+  "embedding": "siliconflow:BAAI/bge-m3",
+  "embedding_backend": "siliconflow:BAAI/bge-m3",
+  "vector_kind": "dense",
+  "dims": 1024,
+  "vector_dim": 1024,
+  "window_size": 6,
+  "overlap": 2,
+  "unit_types": [
+    "paragraph",
+    "question",
+    "sentence",
+    "window"
+  ],
+  "trace_dir": "data/pdf_rag_bge_m3/traces",
+  "documents": [
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/人纪01针灸视频同步文稿 2024新版.pdf",
+      "size_bytes": 4985070,
+      "paragraphs": 546,
+      "retrieval_units": 22577
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/人纪02内经视频同步文稿 2024新版.pdf",
+      "size_bytes": 7825130,
+      "paragraphs": 631,
+      "retrieval_units": 17698
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/人纪03本草视频同步文稿 2024新版.pdf",
+      "size_bytes": 86880293,
+      "paragraphs": 620,
+      "retrieval_units": 17296
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/人纪04伤寒视频同步文稿 2024新版.pdf",
+      "size_bytes": 4465938,
+      "paragraphs": 547,
+      "retrieval_units": 19864
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/人纪05金匮视频同步文稿 2024新版.pdf",
+      "size_bytes": 4966452,
+      "paragraphs": 683,
+      "retrieval_units": 24042
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/倪海厦人纪系列之伤寒论.pdf",
+      "size_bytes": 2714484,
+      "paragraphs": 376,
+      "retrieval_units": 8187
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/倪海厦人纪系列之神农本草经.pdf",
+      "size_bytes": 1619483,
+      "paragraphs": 210,
+      "retrieval_units": 7036
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/倪海厦人纪系列之金匮要略.pdf",
+      "size_bytes": 2871497,
+      "paragraphs": 719,
+      "retrieval_units": 14463
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/倪海厦人纪系列之针灸教程.pdf",
+      "size_bytes": 1846334,
+      "paragraphs": 404,
+      "retrieval_units": 13702
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/倪海厦仲景心法传讲 同步文稿85页.pdf",
+      "size_bytes": 922566,
+      "paragraphs": 178,
+      "retrieval_units": 3273
+    },
+    {
+      "source_path": "/Users/june/code/data/nihaisha_deeliu/nihaisha/黄帝内经原文和翻译.pdf",
+      "size_bytes": 1470740,
+      "paragraphs": 461,
+      "retrieval_units": 11148
+    }
+  ],
+  "paragraphs": 5375,
+  "retrieval_units": 159286,
+  "text_index": "fts5_trigram",
+  "text_index_rows": 5375,
+  "knowledge_units": 10436,
+  "knowledge_unit_types": {
+    "caution": 2115,
+    "comparison": 303,
+    "dosage": 11,
+    "formula_pattern": 884,
+    "method": 2,
+    "symptom": 7121
+  },
+  "knowledge_extractor_version": "local_rules_v1",
+  "knowledge_trace": "data/pdf_rag_bge_m3/traces/knowledge_units.jsonl",
+  "faiss_index": "data/pdf_rag_bge_m3/vectors.faiss",
+  "faiss_ids": "data/pdf_rag_bge_m3/vector_ids.jsonl",
+  "faiss_vectors": 159286,
+  "faiss_dim": 1024
+}
