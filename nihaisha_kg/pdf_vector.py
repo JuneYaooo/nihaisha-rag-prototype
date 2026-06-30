@@ -22,17 +22,46 @@ TERM_SPLIT_RE = re.compile(r"[，,。！？!?；;、\s]+")
 QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}")
 MEASURE_TERM_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:克|钱|兩|两|分|升|斗|斤|铢)")
 FORMULA_SUFFIXES = ("汤", "丸", "散", "饮", "膏", "丹")
+FORMULA_MAX_CHARS = 8
+FORMULA_MIN_CHARS = 2
 FORMULA_PREFIX_NOISE = (
     "可以讨论",
     "可以用",
     "考虑",
+    "所以",
     "这个",
     "记得",
     "同样是",
     "就用",
+    "这就是",
+    "就是",
     "讨论",
     "使用",
+    "解表用",
+    "攻痞用",
+    "治疗用",
+    "这时",
+    "就是用",
+    "那就是",
+    "这时候",
+    "和",
+    "与",
+    "及",
     "用",
+    "的",
+)
+FORMULA_SIGNAL_CHARS = set("黄芩连桂枝麻葛根柴胡半夏生姜甘草芍药枣参附子茯苓白术干吴茱萸当归枳实栀豉杏仁牡蛎龙骨苇苓泽泻滑石石膏中气梅乌薯蓣肾")
+FORMULA_NUMERAL_PREFIXES = tuple("一二三四五六七八九十百千万大小")
+FORMULA_SIGNAL_REQUIRED_SUFFIXES = {"丸", "散", "饮", "膏", "丹"}
+FORMULA_NON_FORMULA_ENDINGS = (
+    "睾丸",
+    "扩散",
+    "去散",
+    "消散",
+    "分散",
+    "发散",
+    "吹散",
+    "悬饮",
 )
 SIX_CHANNEL_TERMS = ("太阳", "阳明", "少阳", "太阴", "少阴", "厥阴")
 SYMPTOM_TERMS = (
@@ -80,6 +109,94 @@ QUERY_EXPANSION_STOP_TERMS = {
     "现在",
     "过去",
 }
+QUERY_REWRITE_BACKGROUND_TERMS = {
+    "病人",
+    "患者",
+    "男性",
+    "女性",
+    "亚裔",
+    "三天",
+    "昨天",
+    "上午",
+    "下午",
+    "开始",
+    "感觉",
+    "建议",
+    "中药",
+    "什么方",
+    "摄氏度",
+}
+CLINICAL_REWRITE_TERMS = (
+    "下利",
+    "拉肚子",
+    "腹泻",
+    "黄臭",
+    "黃臭",
+    "恶心",
+    "噁心",
+    "干呕",
+    "呕吐",
+    "腹痛",
+    "肠鸣",
+    "心下痞",
+    "食欲差",
+    "胃口差",
+    "发烧",
+    "發燒",
+    "退烧",
+    "怕冷",
+    "恶寒",
+    "咳嗽",
+    "白痰",
+    "咽喉疼痛",
+    "咽痛",
+    "头痛",
+    "肩颈酸痛",
+)
+CLINICAL_EVIDENCE_CLUE_TERMS = tuple(
+    dict.fromkeys(
+        [
+            *SYMPTOM_TERMS,
+            *CLINICAL_REWRITE_TERMS,
+            "热利",
+            "寒利",
+            "表证",
+            "里证",
+            "方证",
+            "心下",
+            "心下痞满",
+            "痞满",
+            "腹满",
+            "口苦",
+            "口干",
+            "便脓血",
+            "肛门灼热",
+            "食欲不振",
+            "胃口不好",
+            "项强",
+        ]
+    )
+)
+CLINICAL_CORE_EVIDENCE_CLUE_TERMS = (
+    "下利",
+    "黄臭",
+    "热利",
+    "寒利",
+    "恶心",
+    "干呕",
+    "腹痛",
+    "肠鸣",
+    "心下",
+    "心下痞",
+    "心下痞满",
+    "痞满",
+    "腹满",
+    "便脓血",
+    "肛门灼热",
+    "食欲差",
+    "食欲不振",
+    "里证",
+)
 KNOWLEDGE_EXTRACTOR_VERSION = "local_rules_v1"
 FORMULA_DOSAGE_SAFETY_NOTICE = (
     "涉及剂量、方药或处方线索时必须谨慎：不同人的体质不同，病情阶段、兼证、年龄、基础病和用药史都不同；"
@@ -208,6 +325,44 @@ def dedupe_keep_order(values: Iterable[str]) -> list[str]:
     return unique
 
 
+def clean_formula_candidate(candidate: str) -> str:
+    cleaned = candidate.strip(" \t\r\n'\"`「」『』《》〈〉“”‘’（）()[]【】：:，,。；;、")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in sorted(FORMULA_PREFIX_NOISE, key=len, reverse=True):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix) :].strip(" \t\r\n'\"`「」『』《》〈〉“”‘’（）()[]【】：:，,。；;、")
+                changed = True
+        for marker in ("用", "宜"):
+            marker_offset = cleaned.rfind(marker)
+            if marker_offset > 0:
+                cleaned = cleaned[marker_offset + len(marker) :].strip(
+                    " \t\r\n'\"`「」『』《》〈〉“”‘’（）()[]【】：:，,。；;、"
+                )
+                changed = True
+    return cleaned
+
+
+def is_probable_formula_term(candidate: str, suffix: str) -> bool:
+    if not (FORMULA_MIN_CHARS <= len(candidate) <= FORMULA_MAX_CHARS):
+        return False
+    if not candidate.endswith(suffix):
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fff]+", candidate):
+        return False
+    if any(connector in candidate[1:-1] for connector in ("和", "与", "及")):
+        return False
+    if any(candidate.endswith(ending) for ending in FORMULA_NON_FORMULA_ENDINGS):
+        return False
+    if suffix in FORMULA_SIGNAL_REQUIRED_SUFFIXES:
+        has_signal = bool(set(candidate) & FORMULA_SIGNAL_CHARS)
+        has_numeral_prefix = candidate.startswith(FORMULA_NUMERAL_PREFIXES)
+        if not has_signal and not has_numeral_prefix:
+            return False
+    return True
+
+
 def extract_formula_terms(text: str) -> list[str]:
     formulas: list[str] = []
     for fragment in TERM_SPLIT_RE.split(text):
@@ -217,12 +372,13 @@ def extract_formula_terms(text: str) -> list[str]:
         for suffix in FORMULA_SUFFIXES:
             offset = fragment.find(suffix)
             while offset >= 0:
-                candidate = fragment[: offset + len(suffix)]
-                for prefix in FORMULA_PREFIX_NOISE:
-                    if candidate.startswith(prefix):
-                        candidate = candidate[len(prefix) :]
-                if 2 <= len(candidate) <= 8 and candidate.endswith(suffix):
-                    formulas.append(candidate)
+                end = offset + len(suffix)
+                max_len = min(FORMULA_MAX_CHARS + 2, end)
+                for length in range(max_len, FORMULA_MIN_CHARS - 1, -1):
+                    candidate = clean_formula_candidate(fragment[end - length : end])
+                    if is_probable_formula_term(candidate, suffix):
+                        formulas.append(candidate)
+                        break
                 offset = fragment.find(suffix, offset + len(suffix))
     return dedupe_keep_order(formulas)
 
@@ -2243,6 +2399,72 @@ def intent_query_terms(intent: str) -> str:
     return ""
 
 
+def normalized_clinical_terms(query: str) -> list[str]:
+    normalized = normalize_query_text(query)
+    terms: list[str] = []
+    replacements = {
+        "拉肚子": "下利",
+        "腹泻": "下利",
+        "噁心": "恶心",
+        "呕吐": "恶心",
+        "發燒": "发烧",
+        "黃臭": "黄臭",
+        "胃口差": "食欲差",
+    }
+    for term in CLINICAL_REWRITE_TERMS:
+        if term in normalized:
+            terms.append(replacements.get(term, term))
+    if "排泄物黄臭" in normalized or "大便黄臭" in normalized or "黄臭" in normalized:
+        terms.extend(["下利", "黄臭", "热利"])
+    if "退烧" in normalized:
+        terms.extend(["退烧", "表证"])
+    return dedupe_keep_order(terms)
+
+
+def clinical_rewrite_queries(query: str) -> list[str]:
+    terms = normalized_clinical_terms(query)
+    term_set = set(terms)
+    queries: list[str] = []
+    if terms:
+        queries.append(" ".join(terms))
+
+    has_diarrhea = bool(term_set & {"下利"})
+    has_nausea = bool(term_set & {"恶心", "干呕"})
+    has_heat_diarrhea = "热利" in term_set or "黄臭" in term_set
+    has_abdominal_pain = "腹痛" in term_set
+    has_epigastric = bool(term_set & {"心下痞", "肠鸣"})
+
+    if has_heat_diarrhea:
+        queries.append("下利 黄臭 热利 方证 鉴别")
+        queries.append("葛根黄芩黄连汤 热利 下利 表证 鉴别")
+    if has_diarrhea and has_nausea:
+        queries.append("下利 恶心 干呕 黄芩加半夏生姜汤 黄芩汤")
+    if has_abdominal_pain and has_nausea:
+        queries.append("腹痛 下利 恶心 黄芩汤 半夏 生姜 鉴别")
+    if has_epigastric:
+        queries.append("心下痞 肠鸣 下利 恶心 半夏泻心汤 生姜泻心汤")
+    if has_diarrhea:
+        queries.append("下利 方证 热利 寒利 鉴别")
+    return dedupe_keep_order(query for query in queries if query.strip())
+
+
+def rewritten_query_terms(query: str, intent: str) -> list[str]:
+    normalized = normalize_query_text(query)
+    if intent == "clinical":
+        terms = normalized_clinical_terms(normalized)
+        terms.extend(extract_formula_terms(normalized))
+        return dedupe_keep_order(terms)
+
+    terms = useful_query_terms(normalized, max_terms=16)
+    terms = [
+        term
+        for term in terms
+        if term not in QUERY_REWRITE_BACKGROUND_TERMS and not re.fullmatch(r"\d+\s*岁", term)
+    ]
+    terms.extend(extract_formula_terms(normalized))
+    return dedupe_keep_order(terms)
+
+
 def build_query_plan(
     query: str,
     intent: str | None = None,
@@ -2251,13 +2473,14 @@ def build_query_plan(
 ) -> list[str]:
     normalized = normalize_query_text(query)
     resolved_intent = intent or detect_answer_intent(normalized)
-    planned: list[str] = [query]
-    if normalized != query:
-        planned.append(normalized)
+    planned: list[str] = []
 
-    query_terms = useful_query_terms(normalized, max_terms=12)
+    query_terms = rewritten_query_terms(normalized, resolved_intent)
     if query_terms:
         planned.append(" ".join(query_terms))
+
+    if resolved_intent == "clinical":
+        planned.extend(clinical_rewrite_queries(normalized))
 
     intent_terms = intent_query_terms(resolved_intent)
     if intent_terms:
@@ -2291,7 +2514,16 @@ def build_query_plan(
             planned.append(" ".join(dedupe_keep_order(kg_terms)[:16]))
         planned.extend(evidence_queries[:4])
 
-    return dedupe_keep_order(part.strip() for part in planned if part.strip())[:max_queries]
+    fallback_queries: list[str] = []
+    if normalized != query:
+        fallback_queries.append(normalized)
+    fallback_queries.append(query)
+
+    primary = dedupe_keep_order(part.strip() for part in planned if part.strip())
+    fallback = [item for item in dedupe_keep_order(fallback_queries) if item not in primary]
+    if len(primary) >= max_queries:
+        return [*primary[: max_queries - 1], fallback[-1]]
+    return [*primary, *fallback][:max_queries]
 
 
 def merge_results_by_paragraph(
@@ -2382,6 +2614,97 @@ def reciprocal_rank_fuse(
     return ranked[:limit]
 
 
+def query_specific_terms(query: str) -> list[str]:
+    generic_terms = {
+        "方证",
+        "鉴别",
+        "症状",
+        "加减",
+        "禁忌",
+        "表证",
+        "里证",
+        "寒热",
+        "虚实",
+        "寒利",
+        "热利",
+    }
+    return [term for term in useful_query_terms(query, max_terms=24) if term not in generic_terms]
+
+
+def clinical_evidence_clues(text: str) -> list[str]:
+    normalized = normalize_query_text(text)
+    replacements = {
+        "拉肚子": "下利",
+        "腹泻": "下利",
+        "呕吐": "恶心",
+        "胃口不好": "食欲差",
+        "食欲不振": "食欲差",
+    }
+    clues = [replacements.get(term, term) for term in CLINICAL_EVIDENCE_CLUE_TERMS if term in normalized]
+    if "黄臭" in normalized and "下利" in normalized:
+        clues.append("热利")
+    return dedupe_keep_order(clues)
+
+
+def clinical_core_evidence_clues(text: str) -> list[str]:
+    normalized = normalize_query_text(text)
+    clues = clinical_evidence_clues(normalized)
+    core_terms = {normalize_query_text(term) for term in CLINICAL_CORE_EVIDENCE_CLUE_TERMS}
+    return [term for term in clues if normalize_query_text(term) in core_terms]
+
+
+def is_clinical_relevant_result(result: dict[str, object]) -> bool:
+    evidence = result_evidence_text(result)
+    formulas = extract_formula_terms(evidence)
+    clues = clinical_evidence_clues(evidence)
+    if formulas and clues:
+        return True
+    if len(clinical_core_evidence_clues(evidence)) >= 2:
+        return True
+    return any(
+        str(unit.get("unit_type", "")) in {"formula_pattern", "clinical_pattern"}
+        and clinical_evidence_clues(
+            " ".join(
+                [
+                    str(unit.get("subject", "")),
+                    str(unit.get("predicate", "")),
+                    str(unit.get("object", "")),
+                    str(unit.get("evidence_quote", "")),
+                ]
+            )
+        )
+        for unit in result.get("matched_knowledge_units", []) or []
+    )
+
+
+def has_clinical_formula_evidence(result: dict[str, object]) -> bool:
+    evidence = result_evidence_text(result)
+    if extract_formula_terms(evidence):
+        return True
+    return any(
+        str(unit.get("unit_type", "")) == "formula_pattern"
+        or extract_formula_terms(str(unit.get("subject", "")))
+        or extract_formula_terms(str(unit.get("object", "")))
+        for unit in result.get("matched_knowledge_units", []) or []
+    )
+
+
+def filter_results_for_query(query: str, results: list[dict[str, object]], intent: str) -> list[dict[str, object]]:
+    if intent != "clinical":
+        return results
+
+    terms = query_specific_terms(query)
+    formulas = extract_formula_terms(query)
+    filtered: list[dict[str, object]] = []
+    for result in results:
+        evidence = result_evidence_text(result)
+        formula_match = bool(formulas and any(formula in evidence for formula in formulas))
+        matched_terms = [term for term in terms if term in evidence]
+        if (formula_match and clinical_evidence_clues(evidence)) or len(matched_terms) >= 2:
+            filtered.append(result)
+    return filtered
+
+
 def run_query_plan_search(
     store: object,
     query_plan: list[str],
@@ -2396,6 +2719,9 @@ def run_query_plan_search(
         if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
             knowledge_results = store.search_knowledge_units(planned_query, limit=per_query_limit)
             results = merge_results_by_paragraph(results, knowledge_results)
+        results = filter_results_for_query(planned_query, results, intent)
+        if not results:
+            continue
         result_sets.append(results)
     return reciprocal_rank_fuse(result_sets, limit=max(limit * 4, 16))
 
@@ -2428,12 +2754,31 @@ def result_diversity_facets(result: dict[str, object], intent: str = "general") 
     return facets
 
 
+def clinical_result_quality_bonus(result: dict[str, object]) -> float:
+    evidence = result_evidence_text(result)
+    formulas = extract_formula_terms(evidence)
+    core_clues = clinical_core_evidence_clues(evidence)
+    bonus = 0.0
+    if formulas:
+        bonus += 0.18
+    if any(str(unit.get("unit_type", "")) == "formula_pattern" for unit in result.get("matched_knowledge_units", []) or []):
+        bonus += 0.35
+    bonus += 0.12 * min(len(core_clues), 4)
+    if {"下利", "热利"} <= set(core_clues) or {"下利", "寒利"} <= set(core_clues):
+        bonus += 0.2
+    if {"下利", "恶心"} <= set(core_clues) or {"下利", "干呕"} <= set(core_clues):
+        bonus += 0.12
+    return bonus
+
+
 def select_diverse_results(
     results: list[dict[str, object]],
     limit: int,
     intent: str = "general",
 ) -> list[dict[str, object]]:
-    if limit <= 0 or len(results) <= limit:
+    if limit <= 0:
+        return []
+    if len(results) <= limit and intent != "clinical":
         return results[:limit]
 
     remaining = sorted(results, key=lambda item: float(item.get("score", 0.0)), reverse=True)
@@ -2458,7 +2803,8 @@ def select_diverse_results(
                 == Path(str(candidate.get("source_path", ""))).name
                 for item in selected
             ) else 0.0
-            candidate_score = relevance + 0.45 * novelty + measure_bonus + source_bonus
+            clinical_bonus = clinical_result_quality_bonus(candidate) if intent == "clinical" else 0.0
+            candidate_score = relevance + 0.45 * novelty + measure_bonus + source_bonus + clinical_bonus
             if candidate_score > best_score:
                 best_score = candidate_score
                 best_index = index
@@ -2570,8 +2916,9 @@ def filter_results_for_intent(intent: str, results: list[dict[str, object]]) -> 
             if "木香饼" in result_evidence_text(result) or "热熨" in result_evidence_text(result)
         ]
     elif intent == "clinical":
-        clinical_terms = ("下利", "恶心", "干呕", "黄臭", "热利", "黄芩", "葛根黄芩黄连汤")
-        filtered = [result for result in results if any(term in result_evidence_text(result) for term in clinical_terms)]
+        clinical_filtered = [result for result in results if is_clinical_relevant_result(result)]
+        formula_filtered = [result for result in clinical_filtered if has_clinical_formula_evidence(result)]
+        return formula_filtered or clinical_filtered
     else:
         filtered = results
     return filtered or results

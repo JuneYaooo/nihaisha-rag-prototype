@@ -20,7 +20,9 @@ from nihaisha_kg.pdf_vector import (
     build_query_plan,
     compose_pdf_rag_answer_with_llm,
     expand_answer_query,
+    extract_formula_terms,
     extract_knowledge_units_from_paragraph,
+    filter_results_for_intent,
     synthesize_pdf_rag_answer,
     write_build_traces,
     build_retrieval_units,
@@ -33,6 +35,7 @@ from nihaisha_kg.pdf_vector import (
     parse_unit_types,
     reciprocal_rank_fuse,
     run_query_plan_search,
+    select_diverse_results,
     split_sentences,
     sparse_dot,
     unpack_dense_vector,
@@ -297,13 +300,37 @@ class PdfVectorTests(unittest.TestCase):
         plan = build_query_plan("古时候的一钱，是现代的多少克？", intent="dosage")
 
         self.assertGreaterEqual(len(plan), 3)
-        self.assertEqual(plan[0], "古时候的一钱，是现代的多少克？")
+        self.assertNotEqual(plan[0], "古时候的一钱，是现代的多少克？")
         self.assertTrue(any("剂量" in query and "换算" in query for query in plan))
         self.assertTrue(any("古时候" not in query and "一钱" in query for query in plan[1:]))
+        self.assertEqual(plan[-1], "古时候的一钱，是现代的多少克？")
         joined_plan = "\n".join(plan)
         self.assertNotIn("3.75克", joined_plan)
         self.assertNotIn("3.6克", joined_plan)
         self.assertNotIn("5克", joined_plan)
+
+    def test_clinical_query_plan_rewrites_long_case_before_raw_fallback(self) -> None:
+        query = (
+            "病人，男，25岁，亚裔。三天前开始感觉疲劳，肩颈酸痛，怕冷。"
+            "之后开始头痛，发烧39摄氏度，咳嗽，咽喉疼痛，有白痰。"
+            "昨天上午退烧了，但下午开始拉肚子，排泄物黄臭，恶心，食欲很差。"
+            "建议开什么中药方？"
+        )
+
+        plan = build_query_plan(query, intent="clinical")
+        primary_queries = plan[:-1]
+        joined_primary = "\n".join(primary_queries)
+
+        self.assertEqual(plan[-1], query)
+        self.assertNotIn("男", joined_primary)
+        self.assertNotIn("25岁", joined_primary)
+        self.assertNotIn("亚裔", joined_primary)
+        self.assertTrue(any("下利" in item or "拉肚子" in item for item in primary_queries))
+        self.assertIn("黄臭", joined_primary)
+        self.assertIn("恶心", joined_primary)
+        self.assertIn("热利", joined_primary)
+        self.assertTrue(any("黄芩加半夏生姜汤" in item for item in primary_queries))
+        self.assertTrue(any("葛根黄芩黄连汤" in item for item in primary_queries))
 
     def test_query_plan_can_add_evidence_derived_followup_queries(self) -> None:
         seed_results = [
@@ -400,6 +427,177 @@ class PdfVectorTests(unittest.TestCase):
         searched_queries = [call[1] for call in store.calls if call[0] == "hybrid"]
         self.assertEqual(searched_queries, plan)
         self.assertEqual(results[0]["paragraph_id"], "p-shared")
+
+    def test_clinical_query_plan_filters_single_term_noise_before_fusion(self) -> None:
+        class FakeStore:
+            def search(self, query: str, limit: int, mode: str) -> list[dict[str, object]]:
+                if "黄芩加半夏生姜汤" in query:
+                    return [
+                        {
+                            "paragraph_id": "p-good",
+                            "score": 1.0,
+                            "text": "下利，恶心，黄芩加半夏生姜汤。",
+                            "title": "伤寒 p169",
+                            "source_path": "/tmp/good.pdf",
+                            "page_start": 169,
+                            "page_end": 169,
+                            "vector_score": 0.0,
+                            "text_score": 1.0,
+                            "knowledge_score": 0.0,
+                            "retrieval_sources": ["text"],
+                            "matched_knowledge_units": [],
+                            "matched_units": [],
+                        }
+                    ]
+                return [
+                    {
+                        "paragraph_id": "p-noise",
+                        "score": 10.0,
+                        "text": "某段只提到下利一次。",
+                        "title": "噪声 p1",
+                        "source_path": "/tmp/noise.pdf",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "vector_score": 0.0,
+                        "text_score": 10.0,
+                        "knowledge_score": 0.0,
+                        "retrieval_sources": ["text"],
+                        "matched_knowledge_units": [],
+                        "matched_units": [],
+                    }
+                ]
+
+            def search_knowledge_units(self, query: str, limit: int) -> list[dict[str, object]]:
+                return []
+
+        results = run_query_plan_search(
+            FakeStore(),
+            ["下利 黄臭 热利 方证 鉴别", "下利 恶心 黄芩加半夏生姜汤 黄芩汤"],
+            limit=4,
+            mode="hybrid",
+            intent="clinical",
+        )
+
+        self.assertEqual(results[0]["paragraph_id"], "p-good")
+        self.assertNotIn("p-noise", {str(result["paragraph_id"]) for result in results})
+
+    def test_clinical_intent_filter_requires_formula_or_multiple_core_clues(self) -> None:
+        noisy = {
+            "paragraph_id": "p-noise",
+            "title": "针灸 p79",
+            "text": "任何胃病、胸口闷痛、气喘咳嗽，通通可以治。",
+            "matched_knowledge_units": [],
+        }
+        useful = {
+            "paragraph_id": "p-useful",
+            "title": "伤寒 p169",
+            "text": "病人下利、黄臭、恶心，要看热利与寒利。",
+            "matched_knowledge_units": [],
+        }
+
+        filtered = filter_results_for_intent("clinical", [noisy, useful])
+
+        self.assertEqual([item["paragraph_id"] for item in filtered], ["p-useful"])
+
+    def test_clinical_intent_filter_does_not_keep_formula_name_without_clues(self) -> None:
+        formula_only = {
+            "paragraph_id": "p-formula-only",
+            "title": "方剂提及 p1",
+            "text": "老师这里提到葛根黄芩黄连汤这个方。",
+            "matched_knowledge_units": [],
+        }
+        formula_with_clue = {
+            "paragraph_id": "p-formula-clue",
+            "title": "伤寒 p168",
+            "text": "葛根黄芩黄连汤，治下利，属于热利。",
+            "matched_knowledge_units": [],
+        }
+        clue_cluster = {
+            "paragraph_id": "p-clue-cluster",
+            "title": "伤寒 p169",
+            "text": "病人下利、黄臭、恶心，要看热利与寒利。",
+            "matched_knowledge_units": [],
+        }
+
+        filtered = filter_results_for_intent(
+            "clinical",
+            [formula_only, formula_with_clue, clue_cluster],
+        )
+
+        self.assertEqual(
+            [item["paragraph_id"] for item in filtered],
+            ["p-formula-clue"],
+        )
+
+    def test_formula_extraction_rejects_common_non_formula_san_words(self) -> None:
+        text = "病势越来越扩散，来急去散，提到睾丸；这里才是真正的葛根黄芩黄连汤和四逆散。"
+
+        formulas = extract_formula_terms(text)
+
+        self.assertIn("葛根黄芩黄连汤", formulas)
+        self.assertIn("四逆散", formulas)
+        self.assertNotIn("越来越扩散", formulas)
+        self.assertNotIn("来急去散", formulas)
+        self.assertFalse(any("睾丸" in formula for formula in formulas))
+
+    def test_formula_extraction_strips_common_instructional_prefixes(self) -> None:
+        text = "所以桂枝人参汤和葛根黄芩黄连汤互为鉴别；有表证时解表用桂枝汤；这就是甘草泻心汤。"
+
+        formulas = extract_formula_terms(text)
+
+        self.assertIn("桂枝人参汤", formulas)
+        self.assertIn("葛根黄芩黄连汤", formulas)
+        self.assertIn("桂枝汤", formulas)
+        self.assertIn("甘草泻心汤", formulas)
+        self.assertFalse(any(formula.startswith(("所以", "解表用", "就是")) for formula in formulas))
+
+    def test_clinical_intent_filter_prefers_formula_evidence_over_symptom_only(self) -> None:
+        symptom_only = {
+            "paragraph_id": "p-symptom-only",
+            "title": "针灸 p131",
+            "text": "有的时候很麻烦要上吐下利，按着内关想好恶心，全部吐掉。",
+            "matched_knowledge_units": [],
+        }
+        formula_evidence = {
+            "paragraph_id": "p-formula",
+            "title": "伤寒 p169",
+            "text": "黄芩加半夏生姜汤，治下利，是热利，同时有恶心。",
+            "matched_knowledge_units": [
+                {"unit_type": "formula_pattern", "subject": "黄芩加半夏生姜汤", "object": "下利恶心"}
+            ],
+        }
+
+        filtered = filter_results_for_intent("clinical", [symptom_only, formula_evidence])
+
+        self.assertEqual([item["paragraph_id"] for item in filtered], ["p-formula"])
+
+    def test_clinical_diversity_selection_prioritizes_richer_formula_pattern_evidence(self) -> None:
+        thin_formula = {
+            "paragraph_id": "p-thin",
+            "score": 10.0,
+            "title": "金匮 p59",
+            "source_path": "/tmp/a.pdf",
+            "page_start": 59,
+            "page_end": 59,
+            "text": "下利，恶心，甘草泻心汤证。",
+            "matched_knowledge_units": [],
+        }
+        rich_formula = {
+            "paragraph_id": "p-rich",
+            "score": 6.0,
+            "title": "伤寒 p169",
+            "source_path": "/tmp/b.pdf",
+            "page_start": 169,
+            "page_end": 169,
+            "text": "黄芩加半夏生姜汤，治下利，是热利，腹痛，同时有恶心。",
+            "matched_knowledge_units": [
+                {"unit_type": "formula_pattern", "subject": "黄芩加半夏生姜汤", "object": "热利下利恶心腹痛"}
+            ],
+        }
+
+        selected = select_diverse_results([thin_formula, rich_formula], limit=2, intent="clinical")
+
+        self.assertEqual(selected[0]["paragraph_id"], "p-rich")
 
     def test_answer_pdf_rag_runs_followup_search_for_diverse_dosage_evidence(self) -> None:
         seed = ParsedParagraph(
