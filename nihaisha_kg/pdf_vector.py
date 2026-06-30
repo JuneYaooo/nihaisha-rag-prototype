@@ -2464,7 +2464,9 @@ def build_query_plan(
     primary = dedupe_keep_order(part.strip() for part in planned if part.strip())
     fallback = [item for item in dedupe_keep_order(fallback_queries) if item not in primary]
     if len(primary) >= max_queries:
-        return [*primary[: max_queries - 1], fallback[-1]]
+        if fallback:
+            return [*primary[: max_queries - 1], fallback[-1]]
+        return primary[:max_queries]
     return [*primary, *fallback][:max_queries]
 
 
@@ -2900,7 +2902,17 @@ def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[di
             if key in seen:
                 continue
             seen.add(key)
-            units.append(unit)
+            enriched = dict(unit)
+            source_path = str(result.get("source_path", ""))
+            page_start = result.get("page_start")
+            enriched.setdefault("paragraph_id", result.get("paragraph_id", ""))
+            enriched.setdefault("source_path", source_path)
+            enriched.setdefault("title", result.get("title", ""))
+            enriched.setdefault("page_start", page_start)
+            enriched.setdefault("page_end", result.get("page_end", page_start))
+            if source_path and page_start:
+                enriched.setdefault("label", f"{Path(source_path).name} p{page_start}")
+            units.append(enriched)
     return units
 
 
@@ -3001,6 +3013,7 @@ def synthesize_pdf_rag_answer(
         max_citations=effective_max_citations,
         intent=intent,
     )
+    related_knowledge_units = collect_matched_knowledge_units(relevant_results)[:12]
     cited = citations if intent == "dosage" else citations[:3]
     citation_refs = "、".join(f"[{citation['index']}]" for citation in cited)
 
@@ -3010,6 +3023,7 @@ def synthesize_pdf_rag_answer(
             "intent": intent,
             "answer": "当前知识库没有检索到足够可靠的原文证据。建议换用更具体的方名、药名、症状或原文短语再查。",
             "citations": [],
+            "related_knowledge_units": [],
             "safety_notice": "",
         }
 
@@ -3057,6 +3071,7 @@ def synthesize_pdf_rag_answer(
         "intent": intent,
         "answer": answer,
         "citations": citations,
+        "related_knowledge_units": related_knowledge_units,
         "safety_notice": safety_notice,
         "results": results,
     }

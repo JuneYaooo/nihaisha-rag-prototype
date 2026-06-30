@@ -213,6 +213,21 @@ def main(argv: list[str] | None = None) -> int:
         for citation in payload.get("citations", []):
             print(f"[{citation['index']}] {citation['label']}")
             print(str(citation["evidence_quote"])[:260])
+        related_units = payload.get("related_knowledge_units", []) or []
+        if related_units:
+            print()
+            print("关联知识点：")
+            for unit in related_units[:8]:
+                label = str(unit.get("label", "")).strip()
+                if label:
+                    print(f"- 来源：{label}")
+                print(
+                    f"  {unit.get('unit_type')} | {unit.get('subject')} | "
+                    f"{unit.get('predicate')} | {unit.get('object')}"
+                )
+                quote = str(unit.get("evidence_quote", "")).strip()
+                if quote:
+                    print(f"  原文线索：{quote[:180]}")
         return 0
 
     parser.error(f"unknown command: {args.command}")

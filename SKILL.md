@@ -127,13 +127,15 @@ Use this final answer structure:
 ```text
 1. 总结
 2. 原文依据
-3. 补充辨析或注意事项
+3. 关联知识点与辨证线索
 4. 安全边界
 ```
 
 The summary comes first. Keep it concise and useful; every factual claim in the summary must carry citation markers such as `[1]`.
 
 The original-evidence section must make citations traceable back to the PDF text. For each citation, include the PDF name, page number, and a short original excerpt from the retrieved paragraph. Do not cite derived knowledge graph triples unless they are backed by original paragraph evidence.
+
+The related-knowledge section should use `related_knowledge_units` from `answer --json` when available. It may summarize formula-pattern, symptom, dosage, method, comparison, or caution units to help the user reason about辨证, but each point must remain tied to retrieved original evidence and must not become a personal diagnosis or prescription.
 
 If evidence is insufficient, say so in the summary and show what was retrieved. Do not fill gaps with model memory or outside knowledge.
 

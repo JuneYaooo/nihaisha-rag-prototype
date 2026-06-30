@@ -396,6 +396,12 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("不同人的体质不同", answer["safety_notice"])
         self.assertIn("不要私自购药", answer["safety_notice"])
         self.assertIn("线下正规中医", answer["safety_notice"])
+        self.assertEqual(len(answer["related_knowledge_units"]), 2)
+        self.assertEqual(answer["related_knowledge_units"][0]["subject"], "一钱")
+        self.assertIn("3.75克", answer["related_knowledge_units"][0]["object"])
+        self.assertEqual(answer["related_knowledge_units"][0]["source_path"], "/tmp/仲景心法.pdf")
+        self.assertEqual(answer["related_knowledge_units"][0]["page_start"], 20)
+        self.assertEqual(answer["related_knowledge_units"][0]["label"], "仲景心法.pdf p20")
 
     def test_dosage_query_expansion_uses_generic_terms_not_fixed_answer_values(self) -> None:
         expanded = expand_answer_query("古时候的一钱，是现代的多少克？")
@@ -470,6 +476,29 @@ class PdfVectorTests(unittest.TestCase):
         self.assertGreaterEqual(len(plan), 5)
         self.assertTrue(any("5克" in query or "3.6克" in query for query in plan))
         self.assertTrue(any("度量衡" in query and "比例" in query for query in plan))
+
+    def test_query_plan_handles_seed_results_when_raw_query_is_already_primary(self) -> None:
+        query = "下利 恶心 黄芩加半夏生姜汤"
+        seed_results = [
+            {
+                "paragraph_id": "p-a",
+                "text": "下利，恶心，黄芩加半夏生姜汤。",
+                "matched_knowledge_units": [
+                    {
+                        "unit_type": "formula_pattern",
+                        "subject": "黄芩加半夏生姜汤",
+                        "predicate": "方证线索",
+                        "object": "下利、恶心",
+                        "evidence_quote": "下利，恶心，黄芩加半夏生姜汤。",
+                    }
+                ],
+            }
+        ]
+
+        plan = build_query_plan(query, intent="clinical", seed_results=seed_results, max_queries=2)
+
+        self.assertLessEqual(len(plan), 2)
+        self.assertIn(query, plan)
 
     def test_reciprocal_rank_fuse_promotes_results_seen_across_query_rewrites(self) -> None:
         result_a = {
