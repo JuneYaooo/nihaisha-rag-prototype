@@ -1,6 +1,6 @@
 # Build And Update Guide
 
-This document is for maintainers who rebuild or incrementally update the bundled Nihaisha RAG database. It is intentionally separate from `README.md`: the README is for users of the runtime Skill, while `skills/nihaisha-rag-builder` is the dedicated builder Skill and this file records the mature build method and operational guardrails.
+This document is for maintainers who rebuild or incrementally update the bundled Nihaisha RAG database. It is intentionally separate from `README.md`: the README is for users of the runtime Skill, while the dedicated builder Skill should live in a separate `nihaisha-rag-builder` repository.
 
 ## What Gets Committed
 

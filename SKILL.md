@@ -9,7 +9,7 @@ Use this skill to answer from the bundled local RAG database. Always ground fact
 
 This skill is for course-material study, source lookup, and TCM theory organization only. Do not provide personal diagnosis, prescriptions, dosage decisions, herb purchasing advice, acupuncture/external-treatment instructions, or self-treatment plans.
 
-For database rebuilds, incremental updates, FAISS regeneration, manifest maintenance, trace review, or Git LFS release checks, use `$nihaisha-rag-builder` instead.
+For database rebuilds, incremental updates, FAISS regeneration, manifest maintenance, trace review, or Git LFS release checks, use the separate `nihaisha-rag-builder` Skill repository instead.
 
 ## Skill Root
 
