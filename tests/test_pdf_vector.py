@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from nihaisha_kg import cli as rag_cli
 from nihaisha_kg.pdf_vector import (
     DenseEmbeddingBackend,
     LocalBgeM3EmbeddingBackend,
@@ -85,6 +88,108 @@ class FakeFaiss:
 
 
 class PdfVectorTests(unittest.TestCase):
+    def test_cli_build_dispatches_to_full_build_function(self) -> None:
+        calls: dict[str, object] = {}
+
+        def fake_build_pdf_vector_store(**kwargs: object) -> dict[str, object]:
+            calls.update(kwargs)
+            return {"paragraphs": 2, "retrieval_units": 3}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            stdout = io.StringIO()
+            with patch("nihaisha_kg.cli.build_pdf_vector_store", side_effect=fake_build_pdf_vector_store, create=True):
+                with redirect_stdout(stdout):
+                    exit_code = rag_cli.main(
+                        [
+                            "build",
+                            "--pdf-dir",
+                            str(base / "pdfs"),
+                            "--out",
+                            str(base / "store"),
+                            "--embedding",
+                            "sparse",
+                            "--window-size",
+                            "4",
+                            "--overlap",
+                            "1",
+                            "--trace-dir",
+                            str(base / "trace"),
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls["pdf_dir"], base / "pdfs")
+        self.assertEqual(calls["out_dir"], base / "store")
+        self.assertEqual(calls["embedding"], "sparse")
+        self.assertEqual(calls["window_size"], 4)
+        self.assertEqual(calls["overlap"], 1)
+        self.assertEqual(calls["trace_dir"], base / "trace")
+        self.assertIn('"paragraphs": 2', stdout.getvalue())
+
+    def test_cli_augment_questions_dispatches_to_existing_function(self) -> None:
+        calls: dict[str, object] = {}
+
+        def fake_augment_pdf_vector_store_questions(db_path: Path, **kwargs: object) -> dict[str, object]:
+            calls["db_path"] = db_path
+            calls.update(kwargs)
+            return {"question_units": 5}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            stdout = io.StringIO()
+            with patch(
+                "nihaisha_kg.cli.augment_pdf_vector_store_questions",
+                side_effect=fake_augment_pdf_vector_store_questions,
+                create=True,
+            ):
+                with redirect_stdout(stdout):
+                    exit_code = rag_cli.main(["augment-questions", "--db", str(db_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls["db_path"], db_path)
+        self.assertIn('"question_units": 5', stdout.getvalue())
+
+    def test_cli_rebuild_indexes_dispatch_to_store_methods(self) -> None:
+        calls: list[tuple[str, Path | None]] = []
+
+        class FakeStore:
+            def __init__(self, db_path: Path) -> None:
+                self.db_path = db_path
+
+            def rebuild_text_index(self) -> dict[str, object]:
+                calls.append(("text", self.db_path))
+                return {"text_index_rows": 7}
+
+            def rebuild_knowledge_units(self, trace_dir: Path | None = None) -> dict[str, object]:
+                calls.append(("knowledge", trace_dir))
+                return {"knowledge_units": 9}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = base / "rag.sqlite"
+            trace_dir = base / "trace"
+            stdout = io.StringIO()
+            with patch("nihaisha_kg.cli.LocalVectorStore", FakeStore):
+                with redirect_stdout(stdout):
+                    text_exit = rag_cli.main(["rebuild-text-index", "--db", str(db_path)])
+                    knowledge_exit = rag_cli.main(
+                        [
+                            "rebuild-knowledge-units",
+                            "--db",
+                            str(db_path),
+                            "--trace-dir",
+                            str(trace_dir),
+                        ]
+                    )
+
+        self.assertEqual(text_exit, 0)
+        self.assertEqual(knowledge_exit, 0)
+        self.assertEqual(calls, [("text", db_path), ("knowledge", trace_dir)])
+        output = stdout.getvalue()
+        self.assertIn('"text_index_rows": 7', output)
+        self.assertIn('"knowledge_units": 9', output)
+
     def test_split_sentences_keeps_chinese_clause_punctuation(self) -> None:
         text = "太阳中风，阳浮而阴弱。桂枝汤主之！若无汗，不可误作同证？"
 
