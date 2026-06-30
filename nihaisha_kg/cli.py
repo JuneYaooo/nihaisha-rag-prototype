@@ -102,8 +102,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     answer.add_argument("--model", default="BAAI/bge-m3")
     answer.add_argument("--batch-size", type=int, default=32)
-    answer.add_argument("--composer", choices=["template", "llm"], default="template")
-    answer.add_argument("--llm-model", default=None)
     answer.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
@@ -201,16 +199,13 @@ def main(argv: list[str] | None = None) -> int:
             embedding=args.embedding,
             model=args.model,
             batch_size=args.batch_size,
-            composer=args.composer,
-            llm_model=args.llm_model,
         )
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
         answer_text = str(payload["answer"])
         print(answer_text)
-        answer_already_has_safety = args.composer == "llm" and "安全边界" in answer_text
-        if payload.get("safety_notice") and not answer_already_has_safety:
+        if payload.get("safety_notice"):
             print()
             print(f"安全边界：{payload['safety_notice']}")
         print()

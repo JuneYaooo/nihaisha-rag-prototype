@@ -17,11 +17,9 @@ from nihaisha_kg.pdf_vector import (
     ParsedParagraph,
     RetrievalUnit,
     SiliconFlowEmbeddingBackend,
-    SiliconFlowChatBackend,
     answer_pdf_rag,
     augment_pdf_vector_store_questions,
     build_query_plan,
-    compose_pdf_rag_answer_with_llm,
     expand_answer_query,
     extract_formula_terms,
     extract_knowledge_units_from_paragraph,
@@ -88,6 +86,15 @@ class FakeFaiss:
 
 
 class PdfVectorTests(unittest.TestCase):
+    def test_cli_answer_rejects_llm_composer_options(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stdout(io.StringIO()), patch("sys.stderr", stderr):
+            with self.assertRaises(SystemExit) as raised:
+                rag_cli.main(["answer", "一钱是多少克？", "--composer", "llm"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("unrecognized arguments: --composer llm", stderr.getvalue())
+
     def test_cli_build_dispatches_to_full_build_function(self) -> None:
         calls: dict[str, object] = {}
 
@@ -802,42 +809,6 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("黄芩加半夏生姜汤", answer["answer"])
         self.assertGreaterEqual(len(answer["citations"]), 1)
 
-    def test_siliconflow_chat_backend_posts_grounded_messages(self) -> None:
-        class FakeResponse:
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict:
-                return {"choices": [{"message": {"content": "基于证据回答。[1]"}}]}
-
-        class FakeSession:
-            def __init__(self) -> None:
-                self.calls = []
-
-            def post(self, url: str, headers: dict, json: dict, timeout: int) -> FakeResponse:
-                self.calls.append((url, headers, json, timeout))
-                return FakeResponse()
-
-        session = FakeSession()
-        backend = SiliconFlowChatBackend(
-            api_key="secret",
-            model="Qwen/Qwen3-32B",
-            session=session,
-        )
-
-        content = backend.complete(
-            [
-                {"role": "system", "content": "只能用证据回答"},
-                {"role": "user", "content": "证据[1]：一钱等于3.75克"},
-            ]
-        )
-
-        self.assertEqual(content, "基于证据回答。[1]")
-        self.assertEqual(session.calls[0][0], "https://api.siliconflow.cn/v1/chat/completions")
-        self.assertEqual(session.calls[0][2]["model"], "Qwen/Qwen3-32B")
-        self.assertIn("只能用证据回答", session.calls[0][2]["messages"][0]["content"])
-        self.assertNotIn("secret", json.dumps(session.calls[0][2], ensure_ascii=False))
-
     def test_local_bge_m3_backend_uses_injected_flagembedding_model(self) -> None:
         class FakeBgeM3Model:
             def __init__(self) -> None:
@@ -904,48 +875,6 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertIsInstance(api_backend, SiliconFlowEmbeddingBackend)
         self.assertIsInstance(local_backend, LocalBgeM3EmbeddingBackend)
-
-    def test_compose_answer_with_llm_uses_only_citation_evidence(self) -> None:
-        class FakeChatBackend:
-            def __init__(self) -> None:
-                self.messages = []
-
-            def complete(self, messages: list[dict[str, str]]) -> str:
-                self.messages = messages
-                return "一钱可见3.75克、5克等说法，仍需回到比例语境。[1][2]"
-
-        answer = {
-            "query": "一钱是多少克？",
-            "intent": "dosage",
-            "answer": "模板答案",
-            "safety_notice": "不是个人用药剂量建议。",
-            "citations": [
-                {
-                    "index": 1,
-                    "label": "仲景心法 p20",
-                    "evidence_quote": "一钱等于3.75克，人纪教程约等于5克。",
-                },
-                {
-                    "index": 2,
-                    "label": "伤寒 p25",
-                    "evidence_quote": "一钱是5克。有的人说一钱是3.6克。",
-                },
-            ],
-            "results": [{"text": "这段不应直接暴露给 LLM composer"}],
-        }
-        backend = FakeChatBackend()
-
-        composed = compose_pdf_rag_answer_with_llm("一钱是多少克？", answer, backend)
-        prompt_text = "\n".join(message["content"] for message in backend.messages)
-
-        self.assertIn("一钱可见3.75克", composed["answer"])
-        self.assertEqual(composed["composer"], "llm")
-        self.assertEqual(composed["template_answer"], "模板答案")
-        self.assertIn("一钱等于3.75克", prompt_text)
-        self.assertIn("不可使用未列出的资料", prompt_text)
-        self.assertIn("不要私自购药", prompt_text)
-        self.assertIn("线下正规中医", prompt_text)
-        self.assertNotIn("这段不应直接暴露", prompt_text)
 
     def test_parse_unit_types_accepts_question_units(self) -> None:
         self.assertEqual(

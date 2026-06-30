@@ -110,37 +110,32 @@ Hybrid vector + text + knowledge search:
 python3 -m nihaisha_kg search "下利 恶心 黄芩加半夏生姜汤" --mode hybrid --limit 8
 ```
 
-Template answer with citations:
+Grounded answer draft with citations:
 
 ```bash
 python3 -m nihaisha_kg answer "木香饼热熨法是来自哪一本书哪一段？" --mode hybrid --limit 8
 ```
 
-LLM-composed answer, constrained to retrieved citations:
-
-```bash
-python3 -m nihaisha_kg answer "古时候的一钱，是现代的多少克？" \
-  --mode hybrid \
-  --composer llm \
-  --llm-model Qwen/Qwen3-32B \
-  --limit 8
-```
-
 Use `--json` when programmatic access to citations, scores, matched knowledge units, or raw result records is needed.
+
+The command returns retrieved evidence, citations, and a conservative local draft. The agent should use its own reasoning and language ability to reorganize the evidence into a fluent final answer, but must stay strictly within the returned citations and original paragraphs.
 
 ## Answer Requirements
 
-Prefer this structure:
+Use this final answer structure:
 
 ```text
-1. 直接结论
-2. 证据依据
-3. 需要鉴别或注意的条件
+1. 总结
+2. 原文依据
+3. 补充辨析或注意事项
 4. 安全边界
-5. 引用
 ```
 
-Every factual claim should be grounded in citations from retrieved evidence. If evidence is insufficient, say so directly.
+The summary comes first. Keep it concise and useful; every factual claim in the summary must carry citation markers such as `[1]`.
+
+The original-evidence section must make citations traceable back to the PDF text. For each citation, include the PDF name, page number, and a short original excerpt from the retrieved paragraph. Do not cite derived knowledge graph triples unless they are backed by original paragraph evidence.
+
+If evidence is insufficient, say so in the summary and show what was retrieved. Do not fill gaps with model memory or outside knowledge.
 
 ## Safety Requirements
 

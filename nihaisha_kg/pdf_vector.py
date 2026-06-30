@@ -976,64 +976,6 @@ class SiliconFlowEmbeddingBackend(DenseEmbeddingBackend):
         raise RuntimeError(f"SiliconFlow embedding request failed: {last_error}") from last_error
 
 
-class SiliconFlowChatBackend:
-    name = "siliconflow_chat"
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str = "https://api.siliconflow.cn/v1",
-        temperature: float = 0.1,
-        max_tokens: int = 1600,
-        timeout: int = 120,
-        max_retries: int = 3,
-        session: object | None = None,
-    ) -> None:
-        load_dotenv_if_present()
-        self.api_key = api_key or os.getenv("SILICONFLOW_API_KEY", "")
-        self.model = model or os.getenv("SILICONFLOW_CHAT_MODEL", "Qwen/Qwen3-32B")
-        self.base_url = base_url.rstrip("/")
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.session = session
-        if not self.api_key:
-            raise RuntimeError("SILICONFLOW_API_KEY is required for SiliconFlow chat completions")
-
-    def complete(self, messages: list[dict[str, str]]) -> str:
-        session = self.session
-        if session is None:
-            import requests
-
-            session = requests.Session()
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries):
-            try:
-                response = session.post(url, headers=headers, json=payload, timeout=self.timeout)
-                response.raise_for_status()
-                data = response.json()
-                return str(data["choices"][0]["message"]["content"]).strip()
-            except Exception as exc:
-                last_error = exc
-                if attempt + 1 >= self.max_retries:
-                    break
-                time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"SiliconFlow chat completion request failed: {last_error}") from last_error
-
-
 def write_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -3120,82 +3062,6 @@ def synthesize_pdf_rag_answer(
     }
 
 
-def build_grounded_composer_messages(
-    query: str,
-    answer: dict[str, object],
-) -> list[dict[str, str]]:
-    citations = answer.get("citations", []) or []
-    citation_lines = []
-    for citation in citations:
-        citation_lines.append(
-            "\n".join(
-                [
-                    f"[{citation.get('index')}] {citation.get('label')}",
-                    f"证据：{citation.get('evidence_quote')}",
-                ]
-            )
-        )
-    evidence_block = "\n\n".join(citation_lines)
-    safety_notice = str(answer.get("safety_notice", "")).strip()
-    intent = str(answer.get("intent", "general"))
-    if intent in {"dosage", "method", "clinical"}:
-        safety_notice = with_formula_dosage_safety(safety_notice)
-    template_answer = str(answer.get("answer", "")).strip()
-    system_prompt = (
-        "你是一个严谨的 source-grounded RAG 答案整理器。"
-        "只能使用用户提供的【证据】回答，不可使用未列出的资料、常识或模型记忆补充事实。"
-        "每个关键事实后必须标注引用编号，如 [1]。"
-        "如果证据不足，要明确说证据不足。"
-        "不要编造书名、页码、条文、剂量或出处。"
-        "如果问题包含具体病人或用药请求，只能整理课程资料中的辨证线索，必须声明不能替代诊断，且不直接给个人处方。"
-        f"凡涉及剂量、方药、处方线索或外治法，必须包含这条安全提示：{FORMULA_DOSAGE_SAFETY_NOTICE}"
-    )
-    user_prompt = f"""问题：
-{query}
-
-问题类型：{intent}
-
-本地模板初稿：
-{template_answer}
-
-安全边界：
-{safety_notice}
-
-【证据】
-{evidence_block}
-
-请用中文生成一个比模板更完整但仍严格受证据约束的回答。输出结构：
-1. 直接结论
-2. 证据依据
-3. 需要鉴别或注意的条件
-4. 安全边界
-
-要求：
-- 不可使用未列出的资料。
-- 引用编号只能来自上面的【证据】。
-- 不要输出没有证据支持的具体剂量建议或个人治疗方案。
-"""
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def compose_pdf_rag_answer_with_llm(
-    query: str,
-    answer: dict[str, object],
-    llm_backend: SiliconFlowChatBackend | object,
-) -> dict[str, object]:
-    messages = build_grounded_composer_messages(query, answer)
-    content = llm_backend.complete(messages)
-    composed = dict(answer)
-    composed["template_answer"] = answer.get("answer", "")
-    composed["answer"] = content
-    composed["composer"] = "llm"
-    composed.pop("results", None)
-    return composed
-
-
 def answer_pdf_rag(
     query: str,
     db_path: Path,
@@ -3205,9 +3071,6 @@ def answer_pdf_rag(
     model: str = "BAAI/bge-m3",
     batch_size: int = 32,
     embedding_backend: SparseHashEmbeddingBackend | DenseEmbeddingBackend | None = None,
-    composer: str = "template",
-    llm_backend: SiliconFlowChatBackend | object | None = None,
-    llm_model: str | None = None,
 ) -> dict[str, object]:
     db_path = db_path.expanduser().resolve()
     if embedding_backend is not None:
@@ -3249,19 +3112,7 @@ def answer_pdf_rag(
     intent_results = filter_results_for_intent(intent, results)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
-    answer["composer"] = "template"
-    if composer == "template":
-        return answer
-    if composer != "llm":
-        raise ValueError(f"unsupported answer composer: {composer}")
-    backend = llm_backend or SiliconFlowChatBackend(model=llm_model)
-    try:
-        return compose_pdf_rag_answer_with_llm(query, answer, backend)
-    except Exception as exc:
-        fallback = dict(answer)
-        fallback["composer"] = "template"
-        fallback["llm_error"] = str(exc)
-        return fallback
+    return answer
 
 
 def extract_pdf_paragraphs(pdf_path: Path, max_chars: int = 900) -> list[ParsedParagraph]:
