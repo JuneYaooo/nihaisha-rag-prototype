@@ -15,6 +15,7 @@ from .pdf_vector import (
 
 
 DEFAULT_DB = Path("data/pdf_rag_bge_m3/rag.sqlite")
+DEFAULT_GUIDE_HTML = Path("/Users/june/code/data/nihaisha_deeliu/倪海厦中医知识导图.html")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     build_faiss.add_argument("--ids", type=Path, default=None)
     build_faiss.add_argument("--batch-size", type=int, default=4096)
 
+    import_guide = sub.add_parser("import-guide", help="import clinical guide HTML nodes")
+    import_guide.add_argument("--db", type=Path, default=DEFAULT_DB)
+    import_guide.add_argument("--html", type=Path, default=DEFAULT_GUIDE_HTML)
+
     search = sub.add_parser("search", help="search the local PDF RAG database")
     search.add_argument("query")
     search.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -102,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     answer.add_argument("--model", default="BAAI/bge-m3")
     answer.add_argument("--batch-size", type=int, default=32)
+    answer.add_argument("--guide-html", type=Path, default=None)
     answer.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
@@ -160,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "import-guide":
+        store = LocalVectorStore(args.db)
+        print(json.dumps(store.import_guide_html(args.html), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "search":
         if args.mode in {"text", "knowledge"}:
             store = LocalVectorStore(args.db)
@@ -191,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "answer":
+        if args.guide_html:
+            LocalVectorStore(args.db).import_guide_html(args.guide_html)
         payload = answer_pdf_rag(
             args.query,
             db_path=args.db,
@@ -208,6 +221,16 @@ def main(argv: list[str] | None = None) -> int:
         if payload.get("safety_notice"):
             print()
             print(f"安全边界：{payload['safety_notice']}")
+        flow = payload.get("differentiation_flow") or {}
+        if flow.get("mermaid"):
+            print()
+            print("辨证流程图：")
+            print(str(flow["mermaid"]))
+        if payload.get("followup_questions"):
+            print()
+            print("关键追问：")
+            for question in payload.get("followup_questions", []):
+                print(f"- {question}")
         print()
         print("引用：")
         for citation in payload.get("citations", []):
@@ -228,6 +251,15 @@ def main(argv: list[str] | None = None) -> int:
                 quote = str(unit.get("evidence_quote", "")).strip()
                 if quote:
                     print(f"  原文线索：{quote[:180]}")
+        guide_nodes = payload.get("related_guide_nodes", []) or []
+        if guide_nodes:
+            print()
+            print("关联导图节点：")
+            for node in guide_nodes[:6]:
+                print(f"- {node.get('badge') or node.get('node_type')} | {node.get('path')}")
+                content = str(node.get("content", "")).strip()
+                if content:
+                    print(f"  导图摘要：{content[:180]}")
         return 0
 
     parser.error(f"unknown command: {args.command}")

@@ -24,6 +24,7 @@ from nihaisha_kg.pdf_vector import (
     extract_formula_terms,
     extract_knowledge_units_from_paragraph,
     filter_results_for_intent,
+    parse_guide_html,
     synthesize_pdf_rag_answer,
     write_build_traces,
     build_retrieval_units,
@@ -86,6 +87,63 @@ class FakeFaiss:
 
 
 class PdfVectorTests(unittest.TestCase):
+    def test_parse_guide_html_extracts_hierarchy_and_detail_text(self) -> None:
+        html = """
+        <details>
+          <summary class="tn-node tn-channel" data-id="shl-taiyang" data-label="太阳病篇" data-search-text="太阳病篇 病位在表">
+            <span class="tn-label">太阳病篇</span><span class="tn-badge">六经</span>
+          </summary>
+          <div class="tn-detail" id="detail-shl-taiyang"><p>病位在表。提纲：脉浮头项强痛而恶寒。</p></div>
+          <ul>
+            <li><div class="tn-node tn-formula tn-leaf" data-id="shl-gzt" data-label="桂枝汤" data-search-text="桂枝汤 使用时机 太阳中风">
+              <span class="tn-label">桂枝汤</span><span class="tn-badge">方</span>
+            </div><div class="tn-detail" id="detail-shl-gzt"><p><strong>使用时机</strong>：太阳中风。</p></div></li>
+          </ul>
+        </details>
+        """
+
+        nodes = parse_guide_html(html)
+
+        self.assertEqual([node.node_id for node in nodes], ["shl-taiyang", "shl-gzt"])
+        self.assertEqual(nodes[0].node_type, "channel")
+        self.assertEqual(nodes[0].badge, "六经")
+        self.assertEqual(nodes[0].path, "太阳病篇")
+        self.assertIn("脉浮头项强痛", nodes[0].content)
+        self.assertEqual(nodes[1].parent_id, "shl-taiyang")
+        self.assertEqual(nodes[1].node_type, "formula")
+        self.assertEqual(nodes[1].badge, "方")
+        self.assertEqual(nodes[1].path, "太阳病篇 > 桂枝汤")
+        self.assertIn("太阳中风", nodes[1].content)
+
+    def test_vector_store_imports_and_searches_guide_nodes(self) -> None:
+        html = """
+        <details>
+          <summary class="tn-node tn-channel" data-id="shl-taiyang" data-label="太阳病篇" data-search-text="太阳病篇 病位在表">
+            <span class="tn-label">太阳病篇</span><span class="tn-badge">六经</span>
+          </summary>
+          <div class="tn-detail" id="detail-shl-taiyang"><p>病位在表。</p></div>
+          <ul>
+            <li><div class="tn-node tn-formula tn-leaf" data-id="shl-hqbx" data-label="黄芩加半夏生姜汤" data-search-text="黄芩加半夏生姜汤 下利 恶心 腹痛 热利">
+              <span class="tn-label">黄芩加半夏生姜汤</span><span class="tn-badge">方</span>
+            </div><div class="tn-detail" id="detail-shl-hqbx"><p>使用时机：下利、恶心、腹痛热利。</p></div></li>
+          </ul>
+        </details>
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "guide.html"
+            html_path.write_text(html, encoding="utf-8")
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+
+            imported = store.import_guide_html(html_path)
+            results = store.search_guide_nodes("下利 恶心 黄芩加半夏生姜汤", limit=3)
+
+        self.assertEqual(imported["guide_nodes"], 2)
+        self.assertEqual(results[0]["node_id"], "shl-hqbx")
+        self.assertEqual(results[0]["label"], "黄芩加半夏生姜汤")
+        self.assertEqual(results[0]["path"], "太阳病篇 > 黄芩加半夏生姜汤")
+        self.assertIn("腹痛热利", results[0]["content"])
+
     def test_cli_answer_rejects_llm_composer_options(self) -> None:
         stderr = io.StringIO()
         with redirect_stdout(io.StringIO()), patch("sys.stderr", stderr):
@@ -133,6 +191,32 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(calls["overlap"], 1)
         self.assertEqual(calls["trace_dir"], base / "trace")
         self.assertIn('"paragraphs": 2', stdout.getvalue())
+
+    def test_cli_import_guide_dispatches_to_store(self) -> None:
+        class FakeStore:
+            def __init__(self, db_path: Path) -> None:
+                self.db_path = db_path
+
+            def import_guide_html(self, html_path: Path) -> dict[str, object]:
+                return {"db_path": str(self.db_path), "guide_html": str(html_path), "guide_nodes": 2}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            stdout = io.StringIO()
+            with patch("nihaisha_kg.cli.LocalVectorStore", FakeStore):
+                with redirect_stdout(stdout):
+                    exit_code = rag_cli.main(
+                        [
+                            "import-guide",
+                            "--db",
+                            str(base / "rag.sqlite"),
+                            "--html",
+                            str(base / "guide.html"),
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"guide_nodes": 2', stdout.getvalue())
 
     def test_cli_augment_questions_dispatches_to_existing_function(self) -> None:
         calls: dict[str, object] = {}
@@ -816,11 +900,27 @@ class PdfVectorTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "rag.sqlite"
+            guide_path = Path(tmpdir) / "guide.html"
+            guide_path.write_text(
+                """
+                <details>
+                  <summary class="tn-node tn-chapter" data-id="jgy-14" data-label="第14课 呕吐哕下利" data-search-text="第14课 呕吐哕下利 消化篇">
+                    <span class="tn-label">第14课 呕吐哕下利</span><span class="tn-badge">病篇</span>
+                  </summary>
+                  <div class="tn-detail" id="detail-jgy-14"><p>消化道疾病完整辨证。</p></div>
+                  <ul><li><div class="tn-node tn-formula tn-leaf" data-id="jgy-hqbx" data-label="黄芩加半夏生姜汤" data-search-text="黄芩加半夏生姜汤 下利 恶心 腹痛 热利 鉴别 葛芩连汤 黄芩汤">
+                    <span class="tn-label">黄芩加半夏生姜汤</span><span class="tn-badge">方</span>
+                  </div><div class="tn-detail" id="detail-jgy-hqbx"><p>下利、恶心、腹痛热利时，和黄芩汤、葛芩连汤鉴别。</p></div></li></ul>
+                </details>
+                """,
+                encoding="utf-8",
+            )
             store = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
             store.recreate()
             store.insert_paragraphs([paragraph])
             store.insert_units(build_retrieval_units([paragraph], window_size=2, overlap=1))
             store.rebuild_knowledge_units()
+            store.import_guide_html(guide_path)
 
             answer = answer_pdf_rag(
                 "病人发烧后下利黄臭恶心，建议开什么方？",
@@ -837,6 +937,10 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("不直接给个人处方", answer["answer"])
         self.assertIn("黄芩加半夏生姜汤", answer["answer"])
         self.assertGreaterEqual(len(answer["citations"]), 1)
+        self.assertEqual(answer["related_guide_nodes"][0]["node_id"], "jgy-hqbx")
+        self.assertIn("黄芩加半夏生姜汤", answer["differentiation_flow"]["mermaid"])
+        self.assertIn("腹痛", "\n".join(answer["followup_questions"]))
+        self.assertIn("恶心", "\n".join(answer["followup_questions"]))
 
     def test_local_bge_m3_backend_uses_injected_flagembedding_model(self) -> None:
         class FakeBgeM3Model:

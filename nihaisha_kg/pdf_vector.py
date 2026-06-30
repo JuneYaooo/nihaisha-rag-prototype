@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import struct
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 
@@ -50,6 +52,12 @@ FORMULA_PREFIX_NOISE = (
     "用",
     "的",
 )
+
+
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
 FORMULA_SIGNAL_CHARS = set("黄芩连桂枝麻葛根柴胡半夏生姜甘草芍药枣参附子茯苓白术干吴茱萸当归枳实栀豉杏仁牡蛎龙骨苇苓泽泻滑石石膏中气梅乌薯蓣肾")
 FORMULA_NUMERAL_PREFIXES = tuple("一二三四五六七八九十百千万大小")
 FORMULA_SIGNAL_REQUIRED_SUFFIXES = {"丸", "散", "饮", "膏", "丹"}
@@ -246,6 +254,132 @@ class KnowledgeUnit:
     evidence_quote: str
     confidence: float
     extractor_version: str = KNOWLEDGE_EXTRACTOR_VERSION
+
+
+@dataclass(frozen=True)
+class GuideNode:
+    node_id: str
+    parent_id: str
+    node_type: str
+    label: str
+    badge: str
+    path: str
+    content: str
+    search_text: str
+
+
+def guide_node_type(class_text: str) -> str:
+    for node_type in ("channel", "chapter", "group", "formula", "concept"):
+        if f"tn-{node_type}" in class_text:
+            return node_type
+    return "node"
+
+
+class GuideHtmlParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.nodes: list[dict[str, str]] = []
+        self.node_by_id: dict[str, dict[str, str]] = {}
+        self.parent_stack: list[str] = []
+        self.active_node_id: str | None = None
+        self.active_node_tag: str | None = None
+        self.active_badge_node_id: str | None = None
+        self.active_detail_id: str | None = None
+        self.detail_depth = 0
+        self.detail_parts: dict[str, list[str]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {key: value or "" for key, value in attrs}
+        class_text = attr.get("class", "")
+        node_id = attr.get("data-id", "")
+        if node_id:
+            label = html.unescape(attr.get("data-label", "")).strip()
+            search_text = html.unescape(attr.get("data-search-text", "")).strip()
+            node = {
+                "node_id": node_id,
+                "parent_id": self.parent_stack[-1] if self.parent_stack else "",
+                "node_type": guide_node_type(class_text),
+                "label": label,
+                "badge": "",
+                "content": search_text,
+                "search_text": search_text,
+            }
+            self.nodes.append(node)
+            self.node_by_id[node_id] = node
+            self.active_node_id = node_id
+            self.active_node_tag = tag
+            if tag == "summary":
+                self.parent_stack.append(node_id)
+
+        if self.active_node_id and "tn-badge" in class_text:
+            self.active_badge_node_id = self.active_node_id
+
+        detail_id = attr.get("id", "")
+        if tag == "div" and detail_id.startswith("detail-"):
+            self.active_detail_id = detail_id.removeprefix("detail-")
+            self.detail_depth = 1
+            self.detail_parts.setdefault(self.active_detail_id, [])
+        elif self.active_detail_id:
+            self.detail_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.active_detail_id:
+            self.detail_depth -= 1
+            if self.detail_depth <= 0:
+                detail_text = normalize_whitespace(" ".join(self.detail_parts[self.active_detail_id]))
+                node = self.node_by_id.get(self.active_detail_id)
+                if node and detail_text:
+                    node["content"] = detail_text
+                self.active_detail_id = None
+                self.detail_depth = 0
+        if self.active_badge_node_id and tag == "span":
+            self.active_badge_node_id = None
+        if self.active_node_tag == tag:
+            self.active_node_id = None
+            self.active_node_tag = None
+        if tag == "details" and self.parent_stack:
+            self.parent_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        text = normalize_whitespace(data)
+        if not text:
+            return
+        if self.active_badge_node_id:
+            node = self.node_by_id.get(self.active_badge_node_id)
+            if node:
+                node["badge"] = text
+        if self.active_detail_id:
+            self.detail_parts.setdefault(self.active_detail_id, []).append(text)
+
+
+def parse_guide_html(html_text: str) -> list[GuideNode]:
+    parser = GuideHtmlParser()
+    parser.feed(html_text)
+    labels_by_id = {node["node_id"]: node["label"] for node in parser.nodes}
+    parsed_nodes: list[GuideNode] = []
+    for node in parser.nodes:
+        path_parts = [node["label"]]
+        parent_id = node["parent_id"]
+        while parent_id:
+            parent_label = labels_by_id.get(parent_id)
+            if parent_label:
+                path_parts.append(parent_label)
+            parent_node = parser.node_by_id.get(parent_id)
+            parent_id = parent_node.get("parent_id", "") if parent_node else ""
+        path = " > ".join(reversed(path_parts))
+        parsed_nodes.append(
+            GuideNode(
+                node_id=node["node_id"],
+                parent_id=node["parent_id"],
+                node_type=node["node_type"],
+                label=node["label"],
+                badge=node["badge"],
+                path=path,
+                content=node["content"],
+                search_text=node["search_text"],
+            )
+        )
+    return parsed_nodes
 
 
 def load_dotenv_if_present(start: Path | None = None) -> None:
@@ -1263,6 +1397,8 @@ class LocalVectorStore:
                 """
                 DROP TABLE IF EXISTS paragraphs;
                 DROP TABLE IF EXISTS retrieval_units;
+                DROP TABLE IF EXISTS guide_nodes_fts;
+                DROP TABLE IF EXISTS guide_nodes;
                 DROP TABLE IF EXISTS knowledge_units_fts;
                 DROP TABLE IF EXISTS knowledge_units;
                 DROP TABLE IF EXISTS meta;
@@ -1319,6 +1455,19 @@ class LocalVectorStore:
 
                 CREATE INDEX idx_knowledge_paragraph ON knowledge_units(paragraph_id);
                 CREATE INDEX idx_knowledge_type ON knowledge_units(unit_type);
+
+                CREATE TABLE guide_nodes (
+                    node_id TEXT PRIMARY KEY,
+                    parent_id TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    badge TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    search_text TEXT NOT NULL
+                );
+
+                CREATE INDEX idx_guide_type ON guide_nodes(node_type);
                 """
             )
             conn.execute("INSERT INTO meta(key, value) VALUES (?, ?)", ("dims", str(self.dims)))
@@ -1431,6 +1580,170 @@ class LocalVectorStore:
             CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge_units(unit_type);
             """
         )
+
+    def ensure_guide_schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS guide_nodes (
+                node_id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                label TEXT NOT NULL,
+                badge TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                search_text TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_guide_type ON guide_nodes(node_type);
+            """
+        )
+
+    def _rebuild_guide_fts(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DROP TABLE IF EXISTS guide_nodes_fts")
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE guide_nodes_fts USING fts5(
+                    node_id UNINDEXED,
+                    label,
+                    path,
+                    content,
+                    search_text,
+                    tokenize='unicode61'
+                )
+                """
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE guide_nodes_fts USING fts5(
+                    node_id UNINDEXED,
+                    label,
+                    path,
+                    content,
+                    search_text
+                )
+                """
+            )
+        conn.execute(
+            """
+            INSERT INTO guide_nodes_fts(node_id, label, path, content, search_text)
+            SELECT node_id, label, path, content, search_text
+            FROM guide_nodes
+            ORDER BY path, node_id
+            """
+        )
+
+    def import_guide_html(self, html_path: Path) -> dict[str, object]:
+        nodes = parse_guide_html(html_path.read_text(encoding="utf-8"))
+        with self.connect() as conn:
+            self.ensure_guide_schema(conn)
+            conn.execute("DELETE FROM guide_nodes")
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO guide_nodes
+                (node_id, parent_id, node_type, label, badge, path, content, search_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        node.node_id,
+                        node.parent_id,
+                        node.node_type,
+                        node.label,
+                        node.badge,
+                        node.path,
+                        node.content,
+                        node.search_text,
+                    )
+                    for node in nodes
+                ],
+            )
+            self._rebuild_guide_fts(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                ("guide_html", str(html_path)),
+            )
+        return {"db_path": str(self.db_path), "guide_html": str(html_path), "guide_nodes": len(nodes)}
+
+    def search_guide_nodes(self, query: str, limit: int = 8) -> list[dict[str, object]]:
+        if not self.db_path.exists():
+            return []
+        with self.connect() as conn:
+            self.ensure_guide_schema(conn)
+            terms = useful_query_terms(query, max_terms=12)
+            terms.extend(extract_formula_terms(query))
+            terms = dedupe_keep_order(terms)
+            candidates: dict[str, float] = {}
+            try:
+                fts_query = fts5_query_from_terms(terms)
+                if fts_query:
+                    rows = conn.execute(
+                        """
+                        SELECT node_id, bm25(guide_nodes_fts) AS rank
+                        FROM guide_nodes_fts
+                        WHERE guide_nodes_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        """,
+                        (fts_query, max(limit * 4, 16)),
+                    ).fetchall()
+                    for row in rows:
+                        candidates[str(row["node_id"])] = max(
+                            candidates.get(str(row["node_id"]), 0.0),
+                            1.0 / (1.0 + abs(float(row["rank"]))),
+                        )
+            except sqlite3.OperationalError:
+                pass
+
+            like_terms = terms[:8] or [query]
+            for term in like_terms:
+                pattern = f"%{term}%"
+                rows = conn.execute(
+                    """
+                    SELECT node_id
+                    FROM guide_nodes
+                    WHERE label LIKE ? OR path LIKE ? OR content LIKE ? OR search_text LIKE ?
+                    LIMIT ?
+                    """,
+                    (pattern, pattern, pattern, pattern, max(limit * 4, 16)),
+                ).fetchall()
+                for row in rows:
+                    candidates[str(row["node_id"])] = candidates.get(str(row["node_id"]), 0.0) + 1.0
+
+            if not candidates:
+                return []
+            placeholders = ",".join("?" for _ in candidates)
+            rows = conn.execute(
+                f"""
+                SELECT node_id, parent_id, node_type, label, badge, path, content, search_text
+                FROM guide_nodes
+                WHERE node_id IN ({placeholders})
+                """,
+                list(candidates),
+            ).fetchall()
+        results = [
+            {
+                "node_id": row["node_id"],
+                "parent_id": row["parent_id"],
+                "node_type": row["node_type"],
+                "label": row["label"],
+                "badge": row["badge"],
+                "path": row["path"],
+                "content": row["content"],
+                "search_text": row["search_text"],
+                "score": candidates[str(row["node_id"])],
+            }
+            for row in rows
+        ]
+        results.sort(key=lambda item: (float(item["score"]), len(str(item["path"]))), reverse=True)
+        return results[:limit]
 
     def rebuild_knowledge_units(self, trace_dir: Path | None = None) -> dict[str, object]:
         with self.connect() as conn:
@@ -2916,6 +3229,78 @@ def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[di
     return units
 
 
+def mermaid_label(text: str, max_chars: int = 42) -> str:
+    cleaned = re.sub(r"[\[\]{}\"<>|]", " ", normalize_whitespace(text))
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1] + "…"
+
+
+def build_differentiation_flow(
+    query: str,
+    guide_nodes: list[dict[str, object]],
+) -> dict[str, object]:
+    if not guide_nodes:
+        return {"format": "mermaid", "mermaid": "", "text_steps": []}
+    primary = guide_nodes[0]
+    lines = [
+        "flowchart TD",
+        f'  A["问题线索: {mermaid_label(query)}"] --> B["导图定位: {mermaid_label(str(primary.get("path", "")))}"]',
+    ]
+    text_steps = [
+        f"问题线索：{normalize_whitespace(query)}",
+        f"导图定位：{primary.get('path', primary.get('label', ''))}",
+    ]
+    previous = "B"
+    for index, node in enumerate(guide_nodes[:4], start=1):
+        node_id = f"C{index}"
+        label = f"{node.get('badge') or node.get('node_type')}: {node.get('label')}"
+        lines.append(f'  {previous} --> {node_id}["{mermaid_label(str(label))}"]')
+        text_steps.append(f"{node.get('badge') or node.get('node_type')}：{node.get('label')}")
+        previous = node_id
+    lines.append(f'  {previous} --> Z["核对 PDF 原文依据"]')
+    text_steps.append("核对 PDF 原文依据")
+    return {
+        "format": "mermaid",
+        "mermaid": "\n".join(lines),
+        "text_steps": text_steps,
+    }
+
+
+def build_followup_questions(
+    query: str,
+    intent: str,
+    guide_nodes: list[dict[str, object]],
+    related_knowledge_units: list[dict[str, object]],
+) -> list[str]:
+    if intent != "clinical":
+        return []
+    context = "\n".join(
+        [
+            query,
+            *(str(node.get("content", "")) for node in guide_nodes[:6]),
+            *(str(unit.get("evidence_quote", "")) for unit in related_knowledge_units[:6]),
+        ]
+    )
+    questions: list[str] = []
+    if any(term in context for term in ("下利", "拉肚子", "腹泻", "热利", "寒利")):
+        questions.extend(
+            [
+                "下利是黄臭热利、清稀寒利，还是完谷不化？",
+                "有没有腹痛？腹痛的位置和按压后变化如何？",
+            ]
+        )
+    if any(term in context for term in ("恶心", "呕", "干呕")):
+        questions.append("恶心是干呕、呕吐有物，还是水入即吐？")
+    if any(term in context for term in ("太阳", "表证", "发烧", "恶寒", "汗")):
+        questions.append("是否仍有表证，例如恶寒、发热、汗出或无汗、头项强痛？")
+    if any(term in context for term in ("心下痞", "肠鸣", "胃", "痞")):
+        questions.append("是否有心下痞满、肠鸣、胃中不适或水饮线索？")
+    if any(term in context for term in ("方", "汤", "剂量", "药")):
+        questions.append("是否存在年龄、基础病、用药史、妊娠或附子/峻下药等风险因素？")
+    return dedupe_keep_order(questions)[:6]
+
+
 def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
     def extract_conversion_values(text: str) -> list[str]:
         values: list[str] = []
@@ -3127,6 +3512,23 @@ def answer_pdf_rag(
     intent_results = filter_results_for_intent(intent, results)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
+    guide_query_parts = [
+        query,
+        str(answer.get("answer", "")),
+        " ".join(
+            str(unit.get("subject", "")) + " " + str(unit.get("object", ""))
+            for unit in answer.get("related_knowledge_units", []) or []
+        ),
+    ]
+    related_guide_nodes = store.search_guide_nodes(" ".join(guide_query_parts), limit=8)
+    answer["related_guide_nodes"] = related_guide_nodes
+    answer["differentiation_flow"] = build_differentiation_flow(query, related_guide_nodes)
+    answer["followup_questions"] = build_followup_questions(
+        query,
+        intent,
+        related_guide_nodes,
+        list(answer.get("related_knowledge_units", []) or []),
+    )
     return answer
 
 

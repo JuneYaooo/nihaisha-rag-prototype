@@ -116,9 +116,24 @@ Grounded answer draft with citations:
 python3 -m nihaisha_kg answer "木香饼热熨法是来自哪一本书哪一段？" --mode hybrid --limit 8
 ```
 
+Import the optional clinician-made guide HTML for friendlier differentiation navigation:
+
+```bash
+python3 -m nihaisha_kg import-guide \
+  --html /Users/june/code/data/nihaisha_deeliu/倪海厦中医知识导图.html
+```
+
+For one-off use without pre-importing:
+
+```bash
+python3 -m nihaisha_kg answer "下利 恶心 黄芩加半夏生姜汤" \
+  --mode hybrid \
+  --guide-html /Users/june/code/data/nihaisha_deeliu/倪海厦中医知识导图.html
+```
+
 Use `--json` when programmatic access to citations, scores, matched knowledge units, or raw result records is needed.
 
-The command returns retrieved evidence, citations, and a conservative local draft. The agent should use its own reasoning and language ability to reorganize the evidence into a fluent final answer, but must stay strictly within the returned citations and original paragraphs.
+The command returns retrieved evidence, citations, related knowledge units, optional guide nodes, and a conservative local draft. The agent should use its own reasoning and language ability to reorganize the evidence into a fluent final answer, but must stay strictly within the returned citations and original paragraphs.
 
 ## Answer Requirements
 
@@ -126,16 +141,22 @@ Use this final answer structure:
 
 ```text
 1. 总结
-2. 原文依据
-3. 关联知识点与辨证线索
-4. 安全边界
+2. 辨证流程图
+3. 关键追问
+4. 原文依据
+5. 关联知识点与辨证线索
+6. 安全边界
 ```
 
 The summary comes first. Keep it concise and useful; every factual claim in the summary must carry citation markers such as `[1]`.
 
 The original-evidence section must make citations traceable back to the PDF text. For each citation, include the PDF name, page number, and a short original excerpt from the retrieved paragraph. Do not cite derived knowledge graph triples unless they are backed by original paragraph evidence.
 
-The related-knowledge section should use `related_knowledge_units` from `answer --json` when available. It may summarize formula-pattern, symptom, dosage, method, comparison, or caution units to help the user reason about辨证, but each point must remain tied to retrieved original evidence and must not become a personal diagnosis or prescription.
+The differentiation-flow section should use `differentiation_flow` when available. Mermaid is preferred when the target surface can render it; otherwise convert `text_steps` into a compact arrow flow.
+
+The follow-up section should use `followup_questions` when available. Ask only for missing辨证 information that changes interpretation, such as腹痛, 寒热, 有汗无汗, 表证, 心下痞, 肠鸣, 呕吐性质, or risk factors.
+
+The related-knowledge section should use `related_knowledge_units` and `related_guide_nodes` from `answer --json` when available. It may summarize formula-pattern, symptom, dosage, method, comparison, caution, or clinician-guide nodes to help the user reason about辨证, but each point must remain tied to retrieved original evidence or marked as guide navigation. It must not become a personal diagnosis or prescription.
 
 If evidence is insufficient, say so in the summary and show what was retrieved. Do not fill gaps with model memory or outside knowledge.
 
