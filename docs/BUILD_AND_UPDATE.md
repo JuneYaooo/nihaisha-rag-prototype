@@ -1,6 +1,6 @@
 # Build And Update Guide
 
-This document is for maintainers who rebuild or incrementally update the bundled Nihaisha RAG database. It is intentionally separate from `README.md`: the README is for users of the Skill, while this file records the mature build method and operational guardrails.
+This document is for maintainers who rebuild or incrementally update the bundled Nihaisha RAG database. It is intentionally separate from `README.md`: the README is for users of the runtime Skill, while `skills/nihaisha-rag-builder` is the dedicated builder Skill and this file records the mature build method and operational guardrails.
 
 ## What Gets Committed
 
@@ -153,4 +153,3 @@ Commit final data assets only after verification. The final pushed state should 
 Use Git LFS for `rag.sqlite` and `vectors.faiss`. If LFS upload fails because of quota or network issues, do not push a partial release. Resolve the LFS problem first or move the large assets to a deliberate external artifact store.
 
 Never commit `.env` or real API keys.
-

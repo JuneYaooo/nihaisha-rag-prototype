@@ -1,0 +1,5 @@
+interface:
+  display_name: "Nihaisha RAG Builder"
+  short_description: "Build and maintain the Nihaisha RAG database"
+  default_prompt: "Use $nihaisha-rag-builder to rebuild or incrementally update the Nihaisha RAG database safely."
+

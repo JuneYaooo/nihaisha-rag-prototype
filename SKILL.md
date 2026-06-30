@@ -9,6 +9,8 @@ Use this skill to answer from the bundled local RAG database. Always ground fact
 
 This skill is for course-material study, source lookup, and TCM theory organization only. Do not provide personal diagnosis, prescriptions, dosage decisions, herb purchasing advice, acupuncture/external-treatment instructions, or self-treatment plans.
 
+For database rebuilds, incremental updates, FAISS regeneration, manifest maintenance, trace review, or Git LFS release checks, use `$nihaisha-rag-builder` instead.
+
 ## Skill Root
 
 Run commands from the directory containing this `SKILL.md`. If working from another directory, pass the absolute database path:
@@ -93,13 +95,6 @@ Stats:
 
 ```bash
 python3 -m nihaisha_kg stats
-```
-
-Rebuild FAISS index when vectors change:
-
-```bash
-python3 -m pip install -e ".[faiss]"
-python3 -m nihaisha_kg build-faiss
 ```
 
 Knowledge graph search:
