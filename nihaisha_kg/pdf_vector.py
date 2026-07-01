@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import html
 import json
 import math
 import os
@@ -12,7 +11,6 @@ import struct
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 
@@ -266,120 +264,26 @@ class GuideNode:
     path: str
     content: str
     search_text: str
+    paragraph_id: str = ""
+    source_path: str = ""
+    title: str = ""
+    page_start: int = 0
+    page_end: int = 0
+    evidence_quote: str = ""
 
 
-def guide_node_type(class_text: str) -> str:
-    for node_type in ("channel", "chapter", "group", "formula", "concept"):
-        if f"tn-{node_type}" in class_text:
-            return node_type
-    return "node"
+GUIDE_UNIT_STYLE = {
+    "formula_pattern": ("formula", "方证"),
+    "symptom": ("concept", "症状"),
+    "dosage": ("concept", "剂量"),
+    "method": ("concept", "方法"),
+    "comparison": ("concept", "鉴别"),
+    "caution": ("concept", "注意"),
+}
 
 
-class GuideHtmlParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.nodes: list[dict[str, str]] = []
-        self.node_by_id: dict[str, dict[str, str]] = {}
-        self.parent_stack: list[str] = []
-        self.active_node_id: str | None = None
-        self.active_node_tag: str | None = None
-        self.active_badge_node_id: str | None = None
-        self.active_detail_id: str | None = None
-        self.detail_depth = 0
-        self.detail_parts: dict[str, list[str]] = {}
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr = {key: value or "" for key, value in attrs}
-        class_text = attr.get("class", "")
-        node_id = attr.get("data-id", "")
-        if node_id:
-            label = html.unescape(attr.get("data-label", "")).strip()
-            search_text = html.unescape(attr.get("data-search-text", "")).strip()
-            node = {
-                "node_id": node_id,
-                "parent_id": self.parent_stack[-1] if self.parent_stack else "",
-                "node_type": guide_node_type(class_text),
-                "label": label,
-                "badge": "",
-                "content": search_text,
-                "search_text": search_text,
-            }
-            self.nodes.append(node)
-            self.node_by_id[node_id] = node
-            self.active_node_id = node_id
-            self.active_node_tag = tag
-            if tag == "summary":
-                self.parent_stack.append(node_id)
-
-        if self.active_node_id and "tn-badge" in class_text:
-            self.active_badge_node_id = self.active_node_id
-
-        detail_id = attr.get("id", "")
-        if tag == "div" and detail_id.startswith("detail-"):
-            self.active_detail_id = detail_id.removeprefix("detail-")
-            self.detail_depth = 1
-            self.detail_parts.setdefault(self.active_detail_id, [])
-        elif self.active_detail_id:
-            self.detail_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if self.active_detail_id:
-            self.detail_depth -= 1
-            if self.detail_depth <= 0:
-                detail_text = normalize_whitespace(" ".join(self.detail_parts[self.active_detail_id]))
-                node = self.node_by_id.get(self.active_detail_id)
-                if node and detail_text:
-                    node["content"] = detail_text
-                self.active_detail_id = None
-                self.detail_depth = 0
-        if self.active_badge_node_id and tag == "span":
-            self.active_badge_node_id = None
-        if self.active_node_tag == tag:
-            self.active_node_id = None
-            self.active_node_tag = None
-        if tag == "details" and self.parent_stack:
-            self.parent_stack.pop()
-
-    def handle_data(self, data: str) -> None:
-        text = normalize_whitespace(data)
-        if not text:
-            return
-        if self.active_badge_node_id:
-            node = self.node_by_id.get(self.active_badge_node_id)
-            if node:
-                node["badge"] = text
-        if self.active_detail_id:
-            self.detail_parts.setdefault(self.active_detail_id, []).append(text)
-
-
-def parse_guide_html(html_text: str) -> list[GuideNode]:
-    parser = GuideHtmlParser()
-    parser.feed(html_text)
-    labels_by_id = {node["node_id"]: node["label"] for node in parser.nodes}
-    parsed_nodes: list[GuideNode] = []
-    for node in parser.nodes:
-        path_parts = [node["label"]]
-        parent_id = node["parent_id"]
-        while parent_id:
-            parent_label = labels_by_id.get(parent_id)
-            if parent_label:
-                path_parts.append(parent_label)
-            parent_node = parser.node_by_id.get(parent_id)
-            parent_id = parent_node.get("parent_id", "") if parent_node else ""
-        path = " > ".join(reversed(path_parts))
-        parsed_nodes.append(
-            GuideNode(
-                node_id=node["node_id"],
-                parent_id=node["parent_id"],
-                node_type=node["node_type"],
-                label=node["label"],
-                badge=node["badge"],
-                path=path,
-                content=node["content"],
-                search_text=node["search_text"],
-            )
-        )
-    return parsed_nodes
+def guide_style_for_unit(unit_type: str) -> tuple[str, str]:
+    return GUIDE_UNIT_STYLE.get(unit_type, ("concept", "知识点"))
 
 
 def load_dotenv_if_present(start: Path | None = None) -> None:
@@ -1464,7 +1368,13 @@ class LocalVectorStore:
                     badge TEXT NOT NULL,
                     path TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    search_text TEXT NOT NULL
+                    search_text TEXT NOT NULL,
+                    paragraph_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    page_start INTEGER NOT NULL,
+                    page_end INTEGER NOT NULL,
+                    evidence_quote TEXT NOT NULL
                 );
 
                 CREATE INDEX idx_guide_type ON guide_nodes(node_type);
@@ -1597,12 +1507,33 @@ class LocalVectorStore:
                 badge TEXT NOT NULL,
                 path TEXT NOT NULL,
                 content TEXT NOT NULL,
-                search_text TEXT NOT NULL
+                search_text TEXT NOT NULL,
+                paragraph_id TEXT NOT NULL DEFAULT '',
+                source_path TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                page_start INTEGER NOT NULL DEFAULT 0,
+                page_end INTEGER NOT NULL DEFAULT 0,
+                evidence_quote TEXT NOT NULL DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_guide_type ON guide_nodes(node_type);
             """
         )
+        existing = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(guide_nodes)").fetchall()
+        }
+        migrations = {
+            "paragraph_id": "ALTER TABLE guide_nodes ADD COLUMN paragraph_id TEXT NOT NULL DEFAULT ''",
+            "source_path": "ALTER TABLE guide_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
+            "title": "ALTER TABLE guide_nodes ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+            "page_start": "ALTER TABLE guide_nodes ADD COLUMN page_start INTEGER NOT NULL DEFAULT 0",
+            "page_end": "ALTER TABLE guide_nodes ADD COLUMN page_end INTEGER NOT NULL DEFAULT 0",
+            "evidence_quote": "ALTER TABLE guide_nodes ADD COLUMN evidence_quote TEXT NOT NULL DEFAULT ''",
+        }
+        for column, sql in migrations.items():
+            if column not in existing:
+                conn.execute(sql)
 
     def _rebuild_guide_fts(self, conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE IF EXISTS guide_nodes_fts")
@@ -1640,16 +1571,104 @@ class LocalVectorStore:
             """
         )
 
-    def import_guide_html(self, html_path: Path) -> dict[str, object]:
-        nodes = parse_guide_html(html_path.read_text(encoding="utf-8"))
+    def rebuild_guide_nodes(self) -> dict[str, object]:
         with self.connect() as conn:
+            self.ensure_knowledge_schema(conn)
             self.ensure_guide_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT knowledge_unit_id, paragraph_id, doc_id, source_path, title, page_start,
+                       page_end, unit_type, subject, predicate, object, evidence_quote
+                FROM knowledge_units
+                ORDER BY source_path, page_start, knowledge_unit_id
+                """
+            ).fetchall()
+            nodes: list[GuideNode] = []
+            for row in rows:
+                node_type, badge = guide_style_for_unit(str(row["unit_type"]))
+                label = str(row["subject"] or row["object"]).strip()
+                if not label:
+                    continue
+                source_name = Path(str(row["source_path"])).name
+                path = f"{source_name} p{row['page_start']} > {badge} > {label}"
+                content = normalize_whitespace(str(row["object"] or row["evidence_quote"]))
+                evidence = normalize_whitespace(str(row["evidence_quote"]))
+                search_text = normalize_whitespace(
+                    " ".join(
+                        [
+                            path,
+                            str(row["unit_type"]),
+                            label,
+                            str(row["predicate"]),
+                            content,
+                            evidence,
+                        ]
+                    )
+                )
+                nodes.append(
+                    GuideNode(
+                        node_id=f"guide-{row['knowledge_unit_id']}",
+                        parent_id="",
+                        node_type=node_type,
+                        label=label,
+                        badge=badge,
+                        path=path,
+                        content=content,
+                        search_text=search_text,
+                        paragraph_id=str(row["paragraph_id"]),
+                        source_path=str(row["source_path"]),
+                        title=str(row["title"]),
+                        page_start=int(row["page_start"]),
+                        page_end=int(row["page_end"]),
+                        evidence_quote=evidence,
+                    )
+                )
+            paragraph_rows = conn.execute(
+                """
+                SELECT paragraph_id, source_path, title, page_start, page_end, text
+                FROM paragraphs
+                ORDER BY source_path, page_start, paragraph_id
+                """
+            ).fetchall()
+            existing_node_ids = {node.node_id for node in nodes}
+            for row in paragraph_rows:
+                text = str(row["text"])
+                for formula in extract_formula_terms(text):
+                    node_id = f"guide-formula-{stable_id(row['paragraph_id'], formula)}"
+                    if node_id in existing_node_ids:
+                        continue
+                    existing_node_ids.add(node_id)
+                    source_name = Path(str(row["source_path"])).name
+                    path = f"{source_name} p{row['page_start']} > 方证 > {formula}"
+                    evidence = evidence_quote(text, max_chars=260)
+                    search_text = normalize_whitespace(
+                        " ".join([path, "formula_pattern", formula, text[:600], evidence])
+                    )
+                    nodes.append(
+                        GuideNode(
+                            node_id=node_id,
+                            parent_id="",
+                            node_type="formula",
+                            label=formula,
+                            badge="方证",
+                            path=path,
+                            content=evidence,
+                            search_text=search_text,
+                            paragraph_id=str(row["paragraph_id"]),
+                            source_path=str(row["source_path"]),
+                            title=str(row["title"]),
+                            page_start=int(row["page_start"]),
+                            page_end=int(row["page_end"]),
+                            evidence_quote=evidence,
+                        )
+                    )
             conn.execute("DELETE FROM guide_nodes")
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO guide_nodes
-                (node_id, parent_id, node_type, label, badge, path, content, search_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (node_id, parent_id, node_type, label, badge, path, content, search_text,
+                 paragraph_id, source_path, title, page_start, page_end, evidence_quote)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1661,6 +1680,12 @@ class LocalVectorStore:
                         node.path,
                         node.content,
                         node.search_text,
+                        node.paragraph_id,
+                        node.source_path,
+                        node.title,
+                        node.page_start,
+                        node.page_end,
+                        node.evidence_quote,
                     )
                     for node in nodes
                 ],
@@ -1668,9 +1693,9 @@ class LocalVectorStore:
             self._rebuild_guide_fts(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-                ("guide_html", str(html_path)),
+                ("guide_nodes", str(len(nodes))),
             )
-        return {"db_path": str(self.db_path), "guide_html": str(html_path), "guide_nodes": len(nodes)}
+        return {"db_path": str(self.db_path), "guide_nodes": len(nodes)}
 
     def search_guide_nodes(self, query: str, limit: int = 8) -> list[dict[str, object]]:
         if not self.db_path.exists():
@@ -1722,14 +1747,26 @@ class LocalVectorStore:
             placeholders = ",".join("?" for _ in candidates)
             rows = conn.execute(
                 f"""
-                SELECT node_id, parent_id, node_type, label, badge, path, content, search_text
+                SELECT node_id, parent_id, node_type, label, badge, path, content, search_text,
+                       paragraph_id, source_path, title, page_start, page_end, evidence_quote
                 FROM guide_nodes
                 WHERE node_id IN ({placeholders})
                 """,
                 list(candidates),
             ).fetchall()
-        results = [
-            {
+        normalized_query = normalize_whitespace(query)
+        results = []
+        for row in rows:
+            score = candidates[str(row["node_id"])]
+            label = str(row["label"])
+            if label and label in normalized_query:
+                score += 20.0
+            if row["node_type"] == "formula":
+                score += 5.0
+            if row["badge"] == "方证":
+                score += 3.0
+            results.append(
+                {
                 "node_id": row["node_id"],
                 "parent_id": row["parent_id"],
                 "node_type": row["node_type"],
@@ -1738,10 +1775,15 @@ class LocalVectorStore:
                 "path": row["path"],
                 "content": row["content"],
                 "search_text": row["search_text"],
-                "score": candidates[str(row["node_id"])],
+                "paragraph_id": row["paragraph_id"],
+                "source_path": row["source_path"],
+                "title": row["title"],
+                "page_start": row["page_start"],
+                "page_end": row["page_end"],
+                "evidence_quote": row["evidence_quote"],
+                "score": score,
             }
-            for row in rows
-        ]
+            )
         results.sort(key=lambda item: (float(item["score"]), len(str(item["path"]))), reverse=True)
         return results[:limit]
 

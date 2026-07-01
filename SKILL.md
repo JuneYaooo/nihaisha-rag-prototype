@@ -116,24 +116,16 @@ Grounded answer draft with citations:
 python3 -m nihaisha_kg answer "木香饼热熨法是来自哪一本书哪一段？" --mode hybrid --limit 8
 ```
 
-Import the optional clinician-made guide HTML for friendlier differentiation navigation:
+Build source-grounded guide nodes from the local original evidence:
 
 ```bash
-python3 -m nihaisha_kg import-guide \
-  --html /Users/june/code/data/nihaisha_deeliu/倪海厦中医知识导图.html
-```
-
-For one-off use without pre-importing:
-
-```bash
-python3 -m nihaisha_kg answer "下利 恶心 黄芩加半夏生姜汤" \
-  --mode hybrid \
-  --guide-html /Users/june/code/data/nihaisha_deeliu/倪海厦中医知识导图.html
+python3 -m nihaisha_kg rebuild-knowledge-units
+python3 -m nihaisha_kg rebuild-guide-nodes
 ```
 
 Use `--json` when programmatic access to citations, scores, matched knowledge units, or raw result records is needed.
 
-The command returns retrieved evidence, citations, related knowledge units, optional guide nodes, and a conservative local draft. The agent should use its own reasoning and language ability to reorganize the evidence into a fluent final answer, but must stay strictly within the returned citations and original paragraphs.
+The command returns retrieved evidence, citations, related knowledge units, source-grounded guide nodes, and a conservative local draft. The agent should use its own reasoning and language ability to reorganize the evidence into a fluent final answer, but must stay strictly within the returned citations and original paragraphs.
 
 ## Answer Requirements
 
@@ -156,7 +148,7 @@ The differentiation-flow section should use `differentiation_flow` when availabl
 
 The follow-up section should use `followup_questions` when available. Ask only for missing辨证 information that changes interpretation, such as腹痛, 寒热, 有汗无汗, 表证, 心下痞, 肠鸣, 呕吐性质, or risk factors.
 
-The related-knowledge section should use `related_knowledge_units` and `related_guide_nodes` from `answer --json` when available. It may summarize formula-pattern, symptom, dosage, method, comparison, caution, or clinician-guide nodes to help the user reason about辨证, but each point must remain tied to retrieved original evidence or marked as guide navigation. It must not become a personal diagnosis or prescription.
+The related-knowledge section should use `related_knowledge_units` and `related_guide_nodes` from `answer --json` when available. It may summarize formula-pattern, symptom, dosage, method, comparison, caution, or source-grounded guide nodes to help the user reason about辨证, but each point must remain tied to retrieved original evidence. It must not become a personal diagnosis or prescription.
 
 If evidence is insufficient, say so in the summary and show what was retrieved. Do not fill gaps with model memory or outside knowledge.
 

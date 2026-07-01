@@ -42,7 +42,7 @@ FAISS 是可选加速能力。项目已经带了构建好的 FAISS 索引；如�
 
 当检索结果包含知识图谱线索时，答案还可以列出“关联知识点与辨证线索”，例如方证、症状、剂量、方法、比较和注意事项等。它们用于帮助用户理解资料中的辨证关系，但仍必须绑定到检索到的原文证据，不能扩展成个人诊断、处方或用药建议。
 
-如果有临床医生整理的 HTML 导图，可以先用 `python3 -m nihaisha_kg import-guide --html <导图.html>` 抽取成 `guide_nodes`。之后答案会额外返回 `related_guide_nodes`、`differentiation_flow` 和 `followup_questions`，用于把“方证、病理链条、鉴别点、关键追问”组织成更友好的辨证流程图。导图只做导航，最终依据仍以 PDF 原文引用为准。
+可以参考临床医生导图的组织模式，但数据来源仍然是本仓库的原文段落和知识图谱。先运行 `python3 -m nihaisha_kg rebuild-knowledge-units`，再运行 `python3 -m nihaisha_kg rebuild-guide-nodes`，即可从原文证据抽取 `guide_nodes`。之后答案会额外返回 `related_guide_nodes`、`differentiation_flow` 和 `followup_questions`，用于把“方证、病理链条、鉴别点、关键追问”组织成更友好的辨证流程图。导图节点只做导航，最终依据仍以 PDF 原文引用为准。
 
 如果只是查术语、书名、页码、原文句子或非常明确的关键词，全文搜索和知识图谱检索通常更快，也不需要 embedding API。
 
