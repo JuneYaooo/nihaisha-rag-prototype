@@ -286,6 +286,39 @@ def guide_style_for_unit(unit_type: str) -> tuple[str, str]:
     return GUIDE_UNIT_STYLE.get(unit_type, ("concept", "知识点"))
 
 
+def has_repeated_ocr_phrase(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return bool(re.search(r"([\u4e00-\u9fff]{2,8})\1{2,}", compact))
+
+
+def has_guide_source_noise(text: str) -> bool:
+    normalized = normalize_whitespace(text)
+    if re.search(r"[.．·]{6,}", normalized):
+        return True
+    if normalized.count("...") >= 2:
+        return True
+    if has_repeated_ocr_phrase(normalized):
+        return True
+    return False
+
+
+def clean_guide_evidence_text(text: str) -> str:
+    cleaned = normalize_whitespace(text)
+    cleaned = re.sub(r"^微信公众号[:：].*?道法自然\d*", "", cleaned)
+    cleaned = re.sub(r"^微信公众号[:：][^。！？；\n]{0,120}\d*", "", cleaned)
+    cleaned = re.sub(r"^\d{1,4}(?=[\u4e00-\u9fff])", "", cleaned)
+    return cleaned.strip()
+
+
+def is_guide_source_text(text: str) -> bool:
+    normalized = normalize_whitespace(text)
+    if len(normalized) < 12:
+        return False
+    if has_guide_source_noise(normalized):
+        return False
+    return True
+
+
 def load_dotenv_if_present(start: Path | None = None) -> None:
     search_start = (start or Path.cwd()).resolve()
     candidates = [search_start, *search_start.parents]
@@ -1585,14 +1618,17 @@ class LocalVectorStore:
             ).fetchall()
             nodes: list[GuideNode] = []
             for row in rows:
+                raw_evidence = normalize_whitespace(str(row["evidence_quote"]))
+                if has_guide_source_noise(raw_evidence):
+                    continue
+                evidence = clean_guide_evidence_text(raw_evidence)
                 node_type, badge = guide_style_for_unit(str(row["unit_type"]))
                 label = str(row["subject"] or row["object"]).strip()
                 if not label:
                     continue
                 source_name = Path(str(row["source_path"])).name
                 path = f"{source_name} p{row['page_start']} > {badge} > {label}"
-                content = normalize_whitespace(str(row["object"] or row["evidence_quote"]))
-                evidence = normalize_whitespace(str(row["evidence_quote"]))
+                content = clean_guide_evidence_text(str(row["object"] or evidence))
                 search_text = normalize_whitespace(
                     " ".join(
                         [
@@ -1633,6 +1669,8 @@ class LocalVectorStore:
             existing_node_ids = {node.node_id for node in nodes}
             for row in paragraph_rows:
                 text = str(row["text"])
+                if not is_guide_source_text(text):
+                    continue
                 for formula in extract_formula_terms(text):
                     node_id = f"guide-formula-{stable_id(row['paragraph_id'], formula)}"
                     if node_id in existing_node_ids:
@@ -1640,7 +1678,7 @@ class LocalVectorStore:
                     existing_node_ids.add(node_id)
                     source_name = Path(str(row["source_path"])).name
                     path = f"{source_name} p{row['page_start']} > 方证 > {formula}"
-                    evidence = evidence_quote(text, max_chars=260)
+                    evidence = clean_guide_evidence_text(evidence_quote(text, max_chars=260))
                     search_text = normalize_whitespace(
                         " ".join([path, "formula_pattern", formula, text[:600], evidence])
                     )
@@ -1785,7 +1823,20 @@ class LocalVectorStore:
             }
             )
         results.sort(key=lambda item: (float(item["score"]), len(str(item["path"]))), reverse=True)
-        return results[:limit]
+        unique_results: list[dict[str, object]] = []
+        seen_result_labels: set[tuple[str, str]] = set()
+        for result in results:
+            key = (
+                normalize_whitespace(str(result.get("badge") or result.get("node_type") or "")),
+                normalize_whitespace(str(result.get("label") or "")),
+            )
+            if key in seen_result_labels:
+                continue
+            seen_result_labels.add(key)
+            unique_results.append(result)
+            if len(unique_results) >= limit:
+                break
+        return unique_results
 
     def rebuild_knowledge_units(self, trace_dir: Path | None = None) -> dict[str, object]:
         with self.connect() as conn:
@@ -3284,7 +3335,19 @@ def build_differentiation_flow(
 ) -> dict[str, object]:
     if not guide_nodes:
         return {"format": "mermaid", "mermaid": "", "text_steps": []}
-    primary = guide_nodes[0]
+    unique_nodes: list[dict[str, object]] = []
+    seen_labels: set[tuple[str, str]] = set()
+    for node in guide_nodes:
+        label = normalize_whitespace(str(node.get("label", "")))
+        badge = normalize_whitespace(str(node.get("badge") or node.get("node_type") or ""))
+        key = (badge, label)
+        if not label or key in seen_labels:
+            continue
+        seen_labels.add(key)
+        unique_nodes.append(node)
+    if not unique_nodes:
+        return {"format": "mermaid", "mermaid": "", "text_steps": []}
+    primary = unique_nodes[0]
     lines = [
         "flowchart TD",
         f'  A["问题线索: {mermaid_label(query)}"] --> B["导图定位: {mermaid_label(str(primary.get("path", "")))}"]',
@@ -3294,7 +3357,7 @@ def build_differentiation_flow(
         f"导图定位：{primary.get('path', primary.get('label', ''))}",
     ]
     previous = "B"
-    for index, node in enumerate(guide_nodes[:4], start=1):
+    for index, node in enumerate(unique_nodes[:4], start=1):
         node_id = f"C{index}"
         label = f"{node.get('badge') or node.get('node_type')}: {node.get('label')}"
         lines.append(f'  {previous} --> {node_id}["{mermaid_label(str(label))}"]')

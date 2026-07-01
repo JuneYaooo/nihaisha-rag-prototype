@@ -19,6 +19,7 @@ from nihaisha_kg.pdf_vector import (
     SiliconFlowEmbeddingBackend,
     answer_pdf_rag,
     augment_pdf_vector_store_questions,
+    build_differentiation_flow,
     build_query_plan,
     expand_answer_query,
     extract_formula_terms,
@@ -114,6 +115,159 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["page_start"], 169)
         self.assertIn("腹痛", results[0]["content"])
         self.assertIn("热利", results[0]["evidence_quote"])
+
+    def test_rebuild_guide_nodes_skips_table_of_contents_formula_noise(self) -> None:
+        toc = ParsedParagraph(
+            paragraph_id="p-toc",
+            doc_id="doc",
+            source_path="/tmp/伤寒.pdf",
+            title="伤寒 p8",
+            page_start=8,
+            page_end=8,
+            text="黄芩加半夏生姜汤方................................................81105小柴胡汤方................................................812",
+        )
+        body = ParsedParagraph(
+            paragraph_id="p-body",
+            doc_id="doc",
+            source_path="/tmp/伤寒.pdf",
+            title="伤寒 p168",
+            page_start=168,
+            page_end=168,
+            text="若呕者，黄芩加半夏生姜汤主之。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([toc, body])
+            store.rebuild_knowledge_units()
+            store.rebuild_guide_nodes()
+
+            results = store.search_guide_nodes("黄芩加半夏生姜汤", limit=5)
+
+        self.assertTrue(results)
+        self.assertTrue(all(result["paragraph_id"] != "p-toc" for result in results))
+        self.assertEqual(results[0]["paragraph_id"], "p-body")
+
+    def test_rebuild_guide_nodes_skips_repeated_ocr_boilerplate_formula_noise(self) -> None:
+        noisy = ParsedParagraph(
+            paragraph_id="p-noisy",
+            doc_id="doc",
+            source_path="/tmp/金匮.pdf",
+            title="金匮 p345",
+            page_start=345,
+            page_end=345,
+            text=(
+                "倪海厦注倪海厦注倪海厦注倪海厦注《金匮金匮金匮金匮》"
+                "勤求古訓勤求古訓勤求古訓勤求古訓博采眾方博采眾方"
+                "博采眾方博采眾方小桂枝小桂枝小桂枝小桂枝·"
+                "群龙无首群龙无首群龙无首群龙无首10.10.100.10.100.10.100.10.10"
+                "校排校排校排校排干呕而利者干呕而利者干呕而利者干呕而利者，"
+                "黄芩加半夏生姜汤主之黄芩加半夏生姜汤主之黄芩加半夏生姜汤主之。"
+            ),
+        )
+        body = ParsedParagraph(
+            paragraph_id="p-body",
+            doc_id="doc",
+            source_path="/tmp/伤寒.pdf",
+            title="伤寒 p168",
+            page_start=168,
+            page_end=168,
+            text="若呕者，黄芩加半夏生姜汤主之。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([noisy, body])
+            store.rebuild_knowledge_units()
+            store.rebuild_guide_nodes()
+
+            results = store.search_guide_nodes("下利 恶心 黄芩加半夏生姜汤", limit=5)
+
+        self.assertTrue(results)
+        self.assertTrue(all(result["paragraph_id"] != "p-noisy" for result in results))
+        self.assertEqual(results[0]["paragraph_id"], "p-body")
+
+    def test_differentiation_flow_collapses_duplicate_formula_labels(self) -> None:
+        flow = build_differentiation_flow(
+            "下利 恶心 黄芩加半夏生姜汤",
+            [
+                {"badge": "方证", "label": "黄芩加半夏生姜汤", "path": "伤寒 p168 > 方证 > 黄芩加半夏生姜汤"},
+                {"badge": "方证", "label": "黄芩加半夏生姜汤", "path": "伤寒 p169 > 方证 > 黄芩加半夏生姜汤"},
+                {"badge": "方证", "label": "小半夏汤", "path": "金匮 p232 > 方证 > 小半夏汤"},
+            ],
+        )
+
+        self.assertEqual(flow["text_steps"].count("方证：黄芩加半夏生姜汤"), 1)
+        self.assertEqual(flow["text_steps"].count("方证：小半夏汤"), 1)
+
+    def test_rebuild_guide_nodes_cleans_social_header_from_guide_excerpt(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-header",
+            doc_id="doc",
+            source_path="/tmp/金匮.pdf",
+            title="金匮 p232",
+            page_start=232,
+            page_end=232,
+            text="微信公众号：岐黄圣贤智慧、岐黄传承道法自然220下利，黄芩加半夏生姜汤。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.rebuild_knowledge_units()
+            store.rebuild_guide_nodes()
+
+            results = store.search_guide_nodes("下利 黄芩加半夏生姜汤", limit=3)
+
+        self.assertTrue(results)
+        self.assertIn("下利", results[0]["evidence_quote"])
+        self.assertNotIn("微信公众号", results[0]["evidence_quote"])
+        self.assertNotIn("岐黄传承", results[0]["evidence_quote"])
+        self.assertFalse(str(results[0]["content"]).startswith("220"))
+
+    def test_search_guide_nodes_prioritizes_distinct_labels(self) -> None:
+        paragraphs = [
+            ParsedParagraph(
+                paragraph_id="p-a",
+                doc_id="doc",
+                source_path="/tmp/伤寒.pdf",
+                title="伤寒 p168",
+                page_start=168,
+                page_end=168,
+                text="若呕者，黄芩加半夏生姜汤主之。",
+            ),
+            ParsedParagraph(
+                paragraph_id="p-b",
+                doc_id="doc",
+                source_path="/tmp/伤寒.pdf",
+                title="伤寒 p169",
+                page_start=169,
+                page_end=169,
+                text="黄芩加半夏生姜汤，治下利，是热利，同时有恶心。",
+            ),
+            ParsedParagraph(
+                paragraph_id="p-c",
+                doc_id="doc",
+                source_path="/tmp/金匮.pdf",
+                title="金匮 p232",
+                page_start=232,
+                page_end=232,
+                text="小半夏汤，治呕吐，胃中水饮。",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs(paragraphs)
+            store.rebuild_knowledge_units()
+            store.rebuild_guide_nodes()
+
+            results = store.search_guide_nodes("下利 恶心 黄芩加半夏生姜汤 小半夏汤", limit=3)
+
+        labels = [str(result["label"]) for result in results]
+        self.assertIn("黄芩加半夏生姜汤", labels)
+        self.assertIn("小半夏汤", labels)
+        self.assertEqual(len(labels), len(set(labels)))
 
     def test_cli_answer_rejects_llm_composer_options(self) -> None:
         stderr = io.StringIO()
