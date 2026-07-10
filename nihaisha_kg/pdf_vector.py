@@ -229,6 +229,9 @@ ANSWER_ANCHOR_EXCLUDED_TERMS = {
     "相关线索",
 }
 RELIABLE_SOURCE_NAMED_TERMS = ("木香饼", "一钱", "太阳病", "黄金比例")
+UNRELIABLE_FORMULA_ANCHOR_MARKERS = (
+    "这个", "那个", "哪些", "相关", "如何", "怎么", "什么", "熬", "煮", "的"
+)
 
 
 @dataclass(frozen=True)
@@ -2648,13 +2651,16 @@ def detect_answer_intent(query: str) -> str:
         "开什么方",
         "處方",
         "处方",
-        "男",
-        "女",
-        "岁",
+        "男性",
+        "女性",
+        "男患者",
+        "女患者",
         "咳嗽",
         "怕冷",
     )
-    if any(marker in normalized for marker in clinical_markers):
+    if any(marker in normalized for marker in clinical_markers) or re.search(
+        r"\d+\s*岁(?:\s*[男女])?", normalized
+    ):
         return "clinical"
     return "general"
 
@@ -2694,9 +2700,18 @@ def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
     return anchors[:max_terms]
 
 
+def is_reliable_formula_anchor(formula: str) -> bool:
+    normalized = normalize_query_text(formula).strip()
+    if not normalized or normalized == "个汤":
+        return False
+    if any(marker in normalized for marker in UNRELIABLE_FORMULA_ANCHOR_MARKERS):
+        return False
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{1,7}(?:汤|丸|散|饮|膏|丹)", normalized))
+
+
 def reliable_source_anchors(query: str) -> list[str]:
     normalized = normalize_query_text(query)
-    formulas = extract_formula_terms(normalized)
+    formulas = [formula for formula in extract_formula_terms(normalized) if is_reliable_formula_anchor(formula)]
     named = [term for term in RELIABLE_SOURCE_NAMED_TERMS if term in normalized]
     return dedupe_keep_order([*formulas, *named])[:8]
 
@@ -2731,38 +2746,6 @@ def evidence_sentences_for_followup(query: str, results: list[dict[str, object]]
             if has_query_term or has_measure or has_knowledge:
                 sentences.append(sentence)
     return dedupe_keep_order(sentences)
-
-
-def build_followup_query(query: str, results: list[dict[str, object]], intent: str) -> str:
-    if not results:
-        return ""
-    parts = [query, normalize_query_text(query)]
-    if intent == "dosage":
-        parts.append("剂量 换算 度量衡 比例 克 钱")
-    elif intent == "source_lookup":
-        parts.append("出处 原文 治法 材料 方法")
-    elif intent == "clinical":
-        parts.append("方证 鉴别 症状 加减 禁忌")
-
-    for sentence in evidence_sentences_for_followup(query, results):
-        parts.extend(useful_query_terms(sentence, max_terms=16))
-    for result in results[:8]:
-        for unit in result.get("matched_knowledge_units", []) or []:
-            parts.extend(
-                useful_query_terms(
-                    " ".join(
-                        [
-                            str(unit.get("unit_type", "")),
-                            str(unit.get("subject", "")),
-                            str(unit.get("predicate", "")),
-                            str(unit.get("object", "")),
-                            str(unit.get("evidence_quote", "")),
-                        ]
-                    ),
-                    max_terms=12,
-                )
-            )
-    return " ".join(dedupe_keep_order(part for part in parts if part.strip()))
 
 
 def intent_query_terms(intent: str) -> str:
@@ -3033,6 +3016,22 @@ def clinical_core_evidence_clues(text: str) -> list[str]:
     return [term for term in clues if normalize_query_text(term) in core_terms]
 
 
+def canonical_clinical_clues(text: str) -> list[str]:
+    canonical_by_variant = {
+        "怕冷": "恶寒",
+        "恶寒": "恶寒",
+        "腹泻": "下利",
+        "拉肚子": "下利",
+        "下利": "下利",
+        "恶心": "恶心",
+        "干呕": "恶心",
+        "呕吐": "恶心",
+    }
+    normalized = normalize_query_text(text)
+    observed = direct_present_terms(normalized, CLINICAL_EVIDENCE_CLUE_TERMS)
+    return dedupe_keep_order(canonical_by_variant.get(clue, clue) for clue in observed)
+
+
 def is_clinical_relevant_result(result: dict[str, object]) -> bool:
     evidence = result_evidence_text(result)
     formulas = extract_formula_terms(evidence)
@@ -3233,12 +3232,11 @@ def citation_evidence_for_result(result: dict[str, object], intent: str = "gener
         if evidence:
             return dosage_evidence_snippet(evidence)
 
-    knowledge_units = result.get("matched_knowledge_units", []) or []
-    if knowledge_units:
-        evidence = str(knowledge_units[0].get("evidence_quote", "")).strip()
-    else:
-        evidence = evidence_quote(str(result.get("text", "")), max_chars=220)
-    return evidence
+    for unit in result.get("matched_knowledge_units", []) or []:
+        evidence = str(unit.get("evidence_quote", "")).strip()
+        if evidence:
+            return evidence
+    return evidence_quote(str(result.get("text", "")), max_chars=220).strip()
 
 
 def build_citations(
@@ -3250,6 +3248,8 @@ def build_citations(
     seen: set[tuple[str, object, str]] = set()
     for result in results:
         evidence = citation_evidence_for_result(result, intent=intent)
+        if not evidence:
+            continue
         key = (str(result.get("source_path", "")), result.get("page_start"), evidence)
         if key in seen:
             continue
@@ -3301,7 +3301,19 @@ def filter_results_for_intent(
             result for result in results if all(anchor in result_evidence_text(result) for anchor in anchors)
         ]
     elif intent == "clinical":
-        clinical_filtered = [result for result in results if is_clinical_relevant_result(result)]
+        query_formulas = [
+            formula for formula in extract_formula_terms(query) if is_reliable_formula_anchor(formula)
+        ]
+        query_clues = set(canonical_clinical_clues(query))
+        clinical_filtered: list[dict[str, object]] = []
+        for result in results:
+            if not is_clinical_relevant_result(result):
+                continue
+            evidence = result_evidence_text(result)
+            formula_match = bool(query_formulas and any(formula in evidence for formula in query_formulas))
+            clue_match = bool(query_clues & set(canonical_clinical_clues(evidence)))
+            if formula_match or clue_match:
+                clinical_filtered.append(result)
         formula_filtered = [result for result in clinical_filtered if has_clinical_formula_evidence(result)]
         return formula_filtered or clinical_filtered
     else:
@@ -3527,24 +3539,33 @@ def synthesize_pdf_rag_answer(
 ) -> dict[str, object]:
     intent = detect_answer_intent(query)
     relevant_results = filter_results_for_intent(query, intent, results)
-    effective_max_citations = max_citations
     citations = build_citations(
         relevant_results,
-        max_citations=effective_max_citations,
+        max_citations=max_citations,
         intent=intent,
     )
     related_knowledge_units = collect_matched_knowledge_units(relevant_results)[:12]
     cited = citations if intent == "dosage" else citations[:3]
     citation_refs = "、".join(f"[{citation['index']}]" for citation in cited)
 
-    if not relevant_results:
+    if not relevant_results or not citations:
+        if intent == "clinical":
+            safety_notice = with_formula_dosage_safety(
+                "课程资料不能替代诊断；这里不直接给个人处方、剂量或治疗建议。"
+            )
+        elif intent == "dosage" or (intent == "source_lookup" and reliable_source_anchors(query)):
+            safety_notice = with_formula_dosage_safety(
+                "这是课程资料整理和出处检索，不是个人用药剂量建议。"
+            )
+        else:
+            safety_notice = ""
         return {
             "query": query,
             "intent": intent,
             "answer": "当前知识库没有检索到足够可靠的原文证据。建议换用更具体的方名、药名、症状或原文短语再查。",
             "citations": [],
             "related_knowledge_units": [],
-            "safety_notice": "",
+            "safety_notice": safety_notice,
         }
 
     if intent == "dosage":

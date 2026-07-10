@@ -519,9 +519,8 @@ def reliable_source_anchors(query: str) -> list[str]:
     """
     normalized = normalize_query_text(query)
     named_terms = ("木香饼", "一钱", "太阳病", "黄金比例")
-    return dedupe_keep_order(
-        [*extract_formula_terms(normalized), *(term for term in named_terms if term in normalized)]
-    )[:8]
+    formulas = [term for term in extract_formula_terms(normalized) if is_reliable_formula_anchor(term)]
+    return dedupe_keep_order([*formulas, *(term for term in named_terms if term in normalized)])[:8]
 
 
 def detect_answer_intent(query: str) -> str:
@@ -534,9 +533,10 @@ def detect_answer_intent(query: str) -> str:
         return "comparison"
     clinical_markers = (
         "病人", "患者", "发烧", "下利", "拉肚子", "恶心", "咳嗽", "怕冷",
-        "建议开", "开什么方", "处方", "男", "女", "岁",
+        "建议开", "开什么方", "处方", "男性", "女性", "男患者", "女患者",
     )
-    return "clinical" if any(marker in normalized for marker in clinical_markers) else "general"
+    has_age = bool(re.search(r"\d+\s*岁(?:\s*[男女])?", normalized))
+    return "clinical" if has_age or any(marker in normalized for marker in clinical_markers) else "general"
 ```
 
 Replace the `method` branch in `synthesize_pdf_rag_answer` with:
@@ -578,7 +578,7 @@ Replace the `clinical` branch with:
         )
 ```
 
-Keep display topic extraction (`answer_anchor_terms`) separate from hard-filter anchors (`reliable_source_anchors`). Display terms must occur directly in the normalized query and must avoid cross-boundary manufactured terms; reliable anchors are limited to explicit formula names and a small allowlist of distinctive named entities. Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, require every reliable anchor to occur directly in `result_evidence_text(result)`; if no reliable anchor exists, do not over-filter. Include only actual citation locations and excerpts in the synthesized source answer. `build_followup_questions` may use only actual query clues and explicit guide-node or knowledge-unit fields, wrapping derived items in a neutral question. It must not contain fixed diagnostic, differentiation, or medication-risk templates; if no item is derivable, return an empty list.
+Keep display topic extraction (`answer_anchor_terms`) separate from hard-filter anchors (`reliable_source_anchors`). Display terms must occur directly in the normalized query and must avoid cross-boundary manufactured terms; reliable anchors are limited to formula candidates that pass `is_reliable_formula_anchor` (rejecting natural-language 汤 phrases) and a small allowlist of distinctive named entities. Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, require every reliable anchor to occur directly in `result_evidence_text(result)`; if no reliable anchor exists, do not over-filter. For clinical intent, canonicalize synonym groups and retain only quality evidence whose formula or canonical clue overlaps the query. Citations use the first non-empty knowledge-unit quote and fall back to paragraph text; evidence-free citations are omitted. Filtered-empty clinical, dosage, and reliable-formula source answers preserve the exact medical safety notice. Include only actual citation locations and excerpts in the synthesized source answer. `build_followup_questions` may use only actual query clues and explicit guide-node or knowledge-unit fields, wrapping derived items in a neutral question. It must not contain fixed diagnostic, differentiation, or medication-risk templates; if no item is derivable, return an empty list. Remove the unused `build_followup_query` helper.
 
 - [ ] **Step 4: Delete dead fixed query expansion**
 

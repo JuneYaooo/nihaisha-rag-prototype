@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from nihaisha_kg import pdf_vector
 
@@ -24,6 +26,14 @@ def result(
 
 
 class AnswerQualityTests(unittest.TestCase):
+    def test_reliable_formula_anchors_reject_natural_language_tang_phrases(self) -> None:
+        for query in ("这个汤的出处", "如何熬汤的原文", "有哪些相关汤方的原文"):
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_source_anchors(query), [])
+        for formula in ("桂枝汤", "麻黄汤", "四逆汤", "真武汤"):
+            with self.subTest(formula=formula):
+                self.assertEqual(pdf_vector.reliable_source_anchors(f"{formula}出处"), [formula])
+
     def test_source_lookup_answer_uses_retrieved_formula_and_location_only(self) -> None:
         answer = pdf_vector.synthesize_pdf_rag_answer(
             "桂枝汤的出处在哪本书哪一页？",
@@ -47,6 +57,70 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertIn("麻黄汤", answer["answer"])
         self.assertNotIn("下利性质", answer["answer"])
         self.assertNotIn("心下痞满", answer["answer"])
+
+    def test_clinical_synthesis_rejects_evidence_without_query_clue_overlap(self) -> None:
+        answer = pdf_vector.synthesize_pdf_rag_answer(
+            "患者咳嗽、怕冷、无汗，课程有哪些相关线索？",
+            [result("下利恶心，黄芩加半夏生姜汤主之。", page=169)],
+        )
+
+        self.assertEqual(answer["citations"], [])
+        self.assertIn("没有检索到足够可靠", answer["answer"])
+        self.assertNotIn("黄芩加半夏生姜汤", answer["answer"])
+        self.assertIn(pdf_vector.FORMULA_DOSAGE_SAFETY_NOTICE, answer["safety_notice"])
+
+    def test_clinical_synthesis_keeps_canonical_clue_match(self) -> None:
+        answer = pdf_vector.synthesize_pdf_rag_answer(
+            "患者咳嗽、怕冷、无汗，课程有哪些相关线索？",
+            [result("恶寒无汗而喘，麻黄汤主之。", page=35)],
+        )
+
+        self.assertIn("麻黄汤", answer["answer"])
+        self.assertTrue(answer["citations"])
+
+    def test_citation_falls_back_to_paragraph_when_unit_quote_is_blank(self) -> None:
+        evidence = result("太阳中风，桂枝汤主之。")
+        evidence["matched_knowledge_units"] = [
+            {"unit_type": "formula_pattern", "subject": "桂枝汤", "evidence_quote": "   "}
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤原文", [evidence])
+
+        self.assertTrue(answer["citations"][0]["evidence_quote"].strip())
+        self.assertIn("桂枝汤主之", answer["citations"][0]["evidence_quote"])
+        self.assertNotIn("原文摘录：[1] ；", answer["answer"])
+
+    def test_formula_source_no_results_preserves_formula_safety(self) -> None:
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [])
+
+        self.assertIn(pdf_vector.FORMULA_DOSAGE_SAFETY_NOTICE, answer["safety_notice"])
+
+    def test_nonclinical_gender_words_do_not_trigger_clinical_intent(self) -> None:
+        self.assertEqual(pdf_vector.detect_answer_intent("男女有别"), "general")
+        self.assertEqual(pdf_vector.detect_answer_intent("女生课程"), "general")
+        self.assertEqual(pdf_vector.detect_answer_intent("60岁男"), "clinical")
+
+    def test_answer_pdf_rag_source_lookup_uses_real_text_store(self) -> None:
+        paragraph = pdf_vector.ParsedParagraph(
+            paragraph_id="p-gz",
+            doc_id="doc",
+            source_path="/tmp/伤寒论.pdf",
+            title="伤寒论 p68",
+            page_start=68,
+            page_end=68,
+            text="太阳中风，汗出恶风，桂枝汤主之。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = pdf_vector.LocalVectorStore(db_path)
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.rebuild_text_index()
+            answer = pdf_vector.answer_pdf_rag("桂枝汤出处在哪一页？", db_path, mode="text")
+
+        self.assertEqual(answer["intent"], "source_lookup")
+        self.assertIn("伤寒论.pdf p68", answer["answer"])
+        self.assertIn("桂枝汤主之", answer["citations"][0]["evidence_quote"])
 
     def test_no_results_never_emit_empty_citation_marker(self) -> None:
         answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤的出处在哪本书？", [])
