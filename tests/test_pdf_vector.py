@@ -37,7 +37,7 @@ from nihaisha_kg.pdf_vector import (
     pack_dense_vector,
     pack_sparse_vector,
     parse_unit_types,
-    reciprocal_rank_fuse,
+    fuse_query_rewrites,
     run_query_plan_search,
     select_diverse_results,
     split_sentences,
@@ -554,6 +554,41 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["matched_knowledge_units"][0]["unit_type"], "dosage")
         self.assertIn("3.75克", results[0]["matched_knowledge_units"][0]["object"])
 
+    def test_hybrid_search_fuses_channel_ranks_instead_of_adding_raw_scores(self) -> None:
+        def result(paragraph_id: str, score: float, source: str) -> dict[str, object]:
+            return {
+                "paragraph_id": paragraph_id,
+                "score": score,
+                "vector_score": score if source == "vector" else 0.0,
+                "text_score": score if source == "text" else 0.0,
+                "knowledge_score": score if source == "knowledge" else 0.0,
+                "retrieval_sources": [source],
+                "matched_units": [],
+                "matched_knowledge_units": [],
+                "matched_text_terms": [],
+                "unit_types": [],
+            }
+
+        store = LocalVectorStore(Path("unused.sqlite"))
+        vector_results = [result("shared", 0.2, "vector"), result("vector-only", 99.0, "vector")]
+        text_results = [result("shared", 0.1, "text"), result("text-only", 500.0, "text")]
+        knowledge_results: list[dict[str, object]] = []
+        original_vector = json.loads(json.dumps(vector_results))
+        original_text = json.loads(json.dumps(text_results))
+
+        with (
+            patch.object(store, "search_vector", return_value=vector_results),
+            patch.object(store, "search_text", return_value=text_results),
+            patch.object(store, "search_knowledge_units", return_value=knowledge_results),
+        ):
+            results = store.search_hybrid("query", limit=3)
+
+        self.assertEqual(results[0]["paragraph_id"], "shared")
+        self.assertEqual(results[0]["channel_ranks"], {"text": 1, "vector": 1})
+        self.assertEqual(results[0]["score"], results[0]["fusion_score"])
+        self.assertEqual(vector_results, original_vector)
+        self.assertEqual(text_results, original_text)
+
     def test_synthesize_answer_aggregates_dosage_evidence_with_citations(self) -> None:
         results = [
             {
@@ -707,10 +742,12 @@ class PdfVectorTests(unittest.TestCase):
         self.assertLessEqual(len(plan), 2)
         self.assertIn(query, plan)
 
-    def test_reciprocal_rank_fuse_promotes_results_seen_across_query_rewrites(self) -> None:
+    def test_fuse_query_rewrites_promotes_shared_results_without_overwriting_channel_fusion(self) -> None:
         result_a = {
             "paragraph_id": "p-a",
             "score": 10.0,
+            "fusion_score": 0.03,
+            "channel_ranks": {"text": 1},
             "vector_score": 0.0,
             "text_score": 10.0,
             "knowledge_score": 0.0,
@@ -721,6 +758,8 @@ class PdfVectorTests(unittest.TestCase):
         result_b_low_first = {
             "paragraph_id": "p-b",
             "score": 1.0,
+            "fusion_score": 0.02,
+            "channel_ranks": {"text": 2, "vector": 3},
             "vector_score": 0.0,
             "text_score": 1.0,
             "knowledge_score": 0.0,
@@ -730,7 +769,7 @@ class PdfVectorTests(unittest.TestCase):
         }
         result_b_high_second = dict(result_b_low_first, score=8.0, text_score=8.0)
 
-        fused = reciprocal_rank_fuse(
+        fused = fuse_query_rewrites(
             [
                 [result_a, result_b_low_first],
                 [result_b_high_second],
@@ -740,7 +779,10 @@ class PdfVectorTests(unittest.TestCase):
         )
 
         self.assertEqual(fused[0]["paragraph_id"], "p-b")
-        self.assertIn("rrf_score", fused[0])
+        self.assertEqual(fused[0]["score"], fused[0]["query_fusion_score"])
+        self.assertEqual(fused[0]["fusion_score"], 0.02)
+        self.assertEqual(fused[0]["channel_ranks"], {"text": 2, "vector": 3})
+        self.assertEqual(fused[0]["raw_score"], 8.0)
 
     def test_run_query_plan_search_executes_distinct_queries_and_fuses_results(self) -> None:
         class FakeStore:
@@ -774,6 +816,7 @@ class PdfVectorTests(unittest.TestCase):
 
         searched_queries = [call[1] for call in store.calls if call[0] == "hybrid"]
         self.assertEqual(searched_queries, plan)
+        self.assertFalse(any(call[0] == "knowledge" for call in store.calls))
         self.assertEqual(results[0]["paragraph_id"], "p-shared")
 
     def test_clinical_query_plan_filters_single_term_noise_before_fusion(self) -> None:

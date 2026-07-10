@@ -611,7 +611,8 @@ git commit -m "fix: synthesize answers only from retrieved evidence"
 
 - Create: `nihaisha_kg/fusion.py`
 - Create: `tests/test_fusion.py`
-- Modify: `nihaisha_kg/pdf_vector.py:2511-2583,2879-2966`
+- Modify: `nihaisha_kg/pdf_vector.py` hybrid search and query-rewrite fusion
+- Modify: `tests/test_pdf_vector.py`
 
 - [ ] **Step 1: Write failing fusion tests**
 
@@ -684,6 +685,7 @@ Create `nihaisha_kg/fusion.py`:
 ```python
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping, Sequence
 
@@ -705,17 +707,21 @@ def fuse_ranked_channels(
     rank_constant: int = 60,
     channel_weights: Mapping[str, float] | None = None,
 ) -> list[dict[str, object]]:
+    if limit <= 0 or not channels:
+        return []
     weights = {"vector": 1.0, "text": 1.0, "knowledge": 1.0, **(channel_weights or {})}
     fused: dict[str, dict[str, object]] = {}
     for channel in sorted(channels):
+        seen_paragraph_ids: set[str] = set()
         for rank, result in enumerate(channels[channel], start=1):
             paragraph_id = str(result.get("paragraph_id", ""))
-            if not paragraph_id:
+            if not paragraph_id or paragraph_id in seen_paragraph_ids:
                 continue
+            seen_paragraph_ids.add(paragraph_id)
             contribution = weights.get(channel, 1.0) / (rank_constant + rank)
             current = fused.get(paragraph_id)
             if current is None:
-                current = dict(result)
+                current = copy.deepcopy(result)
                 current["raw_channel_scores"] = {}
                 current["channel_ranks"] = {}
                 current["fusion_score"] = 0.0
@@ -734,14 +740,20 @@ def fuse_ranked_channels(
             )
             for field in ("matched_units", "matched_knowledge_units", "matched_text_terms", "unit_types"):
                 current[field] = _merge_unique(list(current[field]), list(result.get(field, [])))
+            for score_field in ("vector_score", "text_score", "knowledge_score"):
+                if score_field in result:
+                    current[score_field] = max(
+                        float(current.get(score_field, 0.0)),
+                        float(result.get(score_field, 0.0)),
+                    )
     ranked = sorted(
         fused.values(),
         key=lambda item: (
-            float(item["fusion_score"]),
-            len(item["channel_ranks"]),
-            max(item["raw_channel_scores"].values(), default=0.0),
+            -float(item["fusion_score"]),
+            -len(item["channel_ranks"]),
+            -max(item["raw_channel_scores"].values(), default=0.0),
+            str(item["paragraph_id"]),
         ),
-        reverse=True,
     )
     return ranked[:limit]
 ```
@@ -761,7 +773,7 @@ Import `fuse_ranked_channels` in `pdf_vector.py`. Replace the current `combined`
         )
 ```
 
-Keep the existing cross-query `reciprocal_rank_fuse` for query rewrites, but rename it to `fuse_query_rewrites` and store its score in `query_fusion_score`. This makes channel fusion and rewrite fusion distinguishable in traces.
+Rename the separate cross-query fusion layer to `fuse_query_rewrites` and store its score in `query_fusion_score`, while preserving each channel-level `fusion_score` and `channel_ranks`. For hybrid mode, do not perform a second knowledge lookup in `run_query_plan_search`, because `search_hybrid` already includes that channel.
 
 - [ ] **Step 5: Run fusion and hybrid regression tests**
 
@@ -772,7 +784,7 @@ python3 -m unittest \
   tests.test_fusion \
   tests.test_pdf_vector.PdfVectorTests.test_hybrid_search_combines_vector_and_text_sources \
   tests.test_pdf_vector.PdfVectorTests.test_hybrid_search_includes_grounded_knowledge_units \
-  tests.test_pdf_vector.PdfVectorTests.test_reciprocal_rank_fuse_promotes_results_seen_across_query_rewrites \
+  tests.test_pdf_vector.PdfVectorTests.test_fuse_query_rewrites_promotes_shared_results_without_overwriting_channel_fusion \
   -v
 ```
 

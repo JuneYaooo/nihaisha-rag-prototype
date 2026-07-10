@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .fusion import fuse_ranked_channels
 from .normalization import lexical_query_terms, normalize_query_text
 
 
@@ -2570,69 +2571,14 @@ class LocalVectorStore:
         vector_results = self.search_vector(query, limit=max(limit * 4, 16), unit_limit=unit_limit)
         text_results = self.search_text(query, limit=max(text_limit, limit * 4))
         knowledge_results = self.search_knowledge_units(query, limit=max(text_limit, limit * 4))
-        combined: dict[str, dict[str, object]] = {}
-
-        for result in vector_results:
-            item = dict(result)
-            item["retrieval_sources"] = set(item.get("retrieval_sources", ["vector"]))
-            item["unit_types"] = set(item.get("unit_types", []))
-            item["matched_text_terms"] = set(item.get("matched_text_terms", []))
-            item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
-            combined[str(item["paragraph_id"])] = item
-
-        for result in text_results:
-            paragraph_id = str(result["paragraph_id"])
-            current = combined.get(paragraph_id)
-            if current is None:
-                item = dict(result)
-                item["retrieval_sources"] = set(item.get("retrieval_sources", ["text"]))
-                item["unit_types"] = set(item.get("unit_types", []))
-                item["matched_text_terms"] = set(item.get("matched_text_terms", []))
-                item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
-                combined[paragraph_id] = item
-                continue
-            current["retrieval_sources"].add("text")
-            current["text_score"] = max(float(current.get("text_score", 0.0)), float(result["text_score"]))
-            current["matched_text_terms"].update(result.get("matched_text_terms", []))
-
-        for result in knowledge_results:
-            paragraph_id = str(result["paragraph_id"])
-            current = combined.get(paragraph_id)
-            if current is None:
-                item = dict(result)
-                item["retrieval_sources"] = set(item.get("retrieval_sources", ["knowledge"]))
-                item["unit_types"] = set(item.get("unit_types", []))
-                item["matched_text_terms"] = set(item.get("matched_text_terms", []))
-                item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
-                combined[paragraph_id] = item
-                continue
-            current["retrieval_sources"].add("knowledge")
-            current["knowledge_score"] = max(
-                float(current.get("knowledge_score", 0.0)),
-                float(result["knowledge_score"]),
-            )
-            current.setdefault("matched_knowledge_units", [])
-            current["matched_knowledge_units"].extend(result.get("matched_knowledge_units", []))
-
-        ranked = []
-        for item in combined.values():
-            vector_score = float(item.get("vector_score", 0.0))
-            text_score = float(item.get("text_score", 0.0))
-            knowledge_score = float(item.get("knowledge_score", 0.0))
-            source_bonus = 0.08 if len(item["retrieval_sources"]) >= 2 else 0.0
-            knowledge_bonus = 0.05 if "knowledge" in item["retrieval_sources"] else 0.0
-            final_score = vector_score + text_score + knowledge_score + source_bonus + knowledge_bonus
-            item["score"] = round(final_score, 6)
-            item["vector_score"] = round(vector_score, 6)
-            item["text_score"] = round(text_score, 6)
-            item["knowledge_score"] = round(knowledge_score, 6)
-            item["retrieval_sources"] = sorted(item["retrieval_sources"])
-            item["unit_types"] = sorted(item["unit_types"])
-            item["matched_text_terms"] = sorted(item["matched_text_terms"])
-            item["matched_knowledge_units"] = item.get("matched_knowledge_units", [])[:5]
-            ranked.append(item)
-        ranked.sort(key=lambda item: float(item["score"]), reverse=True)
-        return ranked[:limit]
+        return fuse_ranked_channels(
+            {
+                "vector": vector_results,
+                "text": text_results,
+                "knowledge": knowledge_results,
+            },
+            limit=limit,
+        )
 
     def search(
         self,
@@ -2998,37 +2944,7 @@ def build_query_plan(
     return [*primary, *fallback][:max_queries]
 
 
-def merge_results_by_paragraph(
-    primary: list[dict[str, object]],
-    secondary: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    merged: dict[str, dict[str, object]] = {}
-    for result in [*secondary, *primary]:
-        paragraph_id = str(result.get("paragraph_id", ""))
-        if not paragraph_id:
-            continue
-        current = merged.get(paragraph_id)
-        if current is None:
-            merged[paragraph_id] = dict(result)
-            continue
-        current["score"] = max(float(current.get("score", 0.0)), float(result.get("score", 0.0)))
-        current["vector_score"] = max(float(current.get("vector_score", 0.0)), float(result.get("vector_score", 0.0)))
-        current["text_score"] = max(float(current.get("text_score", 0.0)), float(result.get("text_score", 0.0)))
-        current["knowledge_score"] = max(
-            float(current.get("knowledge_score", 0.0)),
-            float(result.get("knowledge_score", 0.0)),
-        )
-        sources = set(current.get("retrieval_sources", []))
-        sources.update(result.get("retrieval_sources", []))
-        current["retrieval_sources"] = sorted(sources)
-        current.setdefault("matched_knowledge_units", [])
-        current["matched_knowledge_units"].extend(result.get("matched_knowledge_units", []))
-        current.setdefault("matched_units", [])
-        current["matched_units"].extend(result.get("matched_units", []))
-    return sorted(merged.values(), key=lambda item: float(item.get("score", 0.0)), reverse=True)
-
-
-def reciprocal_rank_fuse(
+def fuse_query_rewrites(
     result_sets: list[list[dict[str, object]]],
     limit: int,
     rank_constant: int = 60,
@@ -3044,7 +2960,7 @@ def reciprocal_rank_fuse(
             if current is None:
                 item = dict(result)
                 item["raw_score"] = float(result.get("score", 0.0))
-                item["rrf_score"] = rrf_increment
+                item["query_fusion_score"] = rrf_increment
                 item["score"] = rrf_increment
                 item["retrieval_sources"] = sorted(set(item.get("retrieval_sources", [])))
                 item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
@@ -3056,8 +2972,10 @@ def reciprocal_rank_fuse(
                 float(current.get("raw_score", current.get("score", 0.0))),
                 float(result.get("score", 0.0)),
             )
-            current["rrf_score"] = float(current.get("rrf_score", 0.0)) + rrf_increment
-            current["score"] = float(current["rrf_score"])
+            current["query_fusion_score"] = (
+                float(current.get("query_fusion_score", 0.0)) + rrf_increment
+            )
+            current["score"] = float(current["query_fusion_score"])
             current["vector_score"] = max(
                 float(current.get("vector_score", 0.0)),
                 float(result.get("vector_score", 0.0)),
@@ -3080,7 +2998,10 @@ def reciprocal_rank_fuse(
 
     ranked = sorted(
         fused.values(),
-        key=lambda item: (float(item.get("rrf_score", 0.0)), float(item.get("raw_score", 0.0))),
+        key=lambda item: (
+            float(item.get("query_fusion_score", 0.0)),
+            float(item.get("raw_score", 0.0)),
+        ),
         reverse=True,
     )
     return ranked[:limit]
@@ -3213,14 +3134,11 @@ def run_query_plan_search(
     result_sets: list[list[dict[str, object]]] = []
     for planned_query in query_plan:
         results = store.search(planned_query, limit=per_query_limit, mode=mode)
-        if mode == "hybrid" and intent in {"dosage", "source_lookup", "clinical"}:
-            knowledge_results = store.search_knowledge_units(planned_query, limit=per_query_limit)
-            results = merge_results_by_paragraph(results, knowledge_results)
         results = filter_results_for_query(planned_query, results, intent)
         if not results:
             continue
         result_sets.append(results)
-    return reciprocal_rank_fuse(result_sets, limit=max(limit * 4, 16))
+    return fuse_query_rewrites(result_sets, limit=max(limit * 4, 16))
 
 
 def result_diversity_facets(result: dict[str, object], intent: str = "general") -> set[str]:
@@ -3874,7 +3792,7 @@ def answer_pdf_rag(
             mode=mode,
             intent=intent,
         )
-        results = reciprocal_rank_fuse([results, followup_results], limit=max(candidate_limit * 2, 32))
+        results = fuse_query_rewrites([results, followup_results], limit=max(candidate_limit * 2, 32))
     intent_results = filter_results_for_intent(query, intent, results)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
