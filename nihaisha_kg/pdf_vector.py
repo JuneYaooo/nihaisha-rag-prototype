@@ -249,11 +249,10 @@ NAMED_RIGHT_QUERY_SUFFIXES = (
 )
 QUERY_BOUNDARY_CHARS = frozenset("，,。！？!?；;、：:（）()【】[]「」『』《》〈〉/\\|\t\r\n ")
 FORMULA_PRODUCT_CONTINUATIONS = ("圆", "锅", "装", "子", "产品", "包装")
-NAMED_EVIDENCE_SUFFIXES = {
-    "木香饼": ("热熨", "贴", "法"),
-    "太阳病": ("欲解", "证", "篇", "中"),
-    "一钱": ("是", "等于", "约", "换算", "为"),
-    "黄金比例": ("是", "为", "指"),
+NAMED_EVIDENCE_INVALID_CONTINUATIONS = {
+    "木香饼": ("干",),
+    "太阳病": ("人",),
+    "一钱": ("包",),
 }
 
 
@@ -2781,14 +2780,10 @@ def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
     if anchor not in RELIABLE_SOURCE_NAMED_TERMS:
         return False
     offset = normalized.find(anchor)
-    allowed_suffixes = NAMED_EVIDENCE_SUFFIXES.get(anchor, ())
+    invalid_continuations = NAMED_EVIDENCE_INVALID_CONTINUATIONS.get(anchor, ())
     while offset >= 0:
         right = normalized[offset + len(anchor) :]
-        if (
-            not right
-            or right[0] in QUERY_BOUNDARY_CHARS
-            or any(right.startswith(suffix) for suffix in allowed_suffixes)
-        ):
+        if not any(right.startswith(continuation) for continuation in invalid_continuations):
             return True
         offset = normalized.find(anchor, offset + 1)
     return False
@@ -2796,6 +2791,15 @@ def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
 
 def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
     return all(source_anchor_matches_evidence(anchor, text) for anchor in anchors)
+
+
+def source_primary_evidence_texts(result: dict[str, object]) -> list[str]:
+    texts = [str(result.get("text", "")).strip()]
+    texts.extend(
+        str(unit.get("evidence_quote", "")).strip()
+        for unit in result.get("matched_knowledge_units", []) or []
+    )
+    return [text for text in texts if text]
 
 
 def reliable_source_anchors(query: str) -> list[str]:
@@ -3459,7 +3463,10 @@ def filter_results_for_intent(
         return [
             result
             for result in results
-            if evidence_contains_source_anchors(result_evidence_text(result), anchors)
+            if any(
+                evidence_contains_source_anchors(text, anchors)
+                for text in source_primary_evidence_texts(result)
+            )
         ]
     elif intent == "clinical":
         query_formulas = reliable_formula_anchors(query)
@@ -3747,7 +3754,9 @@ def synthesize_pdf_rag_answer(
         )
         answer = f"关于“{topic}”，当前检索到的原文位置是：{locations}。原文摘录：{excerpts}"
         has_formula_content = bool(reliable_formula_anchors(query)) or any(
-            known_formula_terms_in_evidence(result_evidence_text(result)) for result in relevant_results
+            known_formula_terms_in_evidence(text)
+            for result in relevant_results
+            for text in source_primary_evidence_texts(result)
         )
         safety_notice = (
             with_formula_dosage_safety("这是原文出处定位和课程整理，不是个人用药建议。")

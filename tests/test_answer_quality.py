@@ -379,6 +379,55 @@ class AnswerQualityTests(unittest.TestCase):
                 )
                 self.assertTrue(pdf_vector.synthesize_pdf_rag_answer(query, [evidence])["citations"])
 
+    def test_named_anchor_evidence_accepts_ordinary_prose_continuations(self) -> None:
+        cases = (
+            ("木香饼出处", "木香饼外敷于患处。"),
+            ("木香饼出处", "木香饼可用于热熨。"),
+            ("太阳病原文", "太阳病发热汗出。"),
+            ("太阳病原文", "太阳病有头痛发热。"),
+            ("一钱原文", "一钱重五克。"),
+            ("一钱原文", "一钱折合三点七五克。"),
+            ("黄金比例原文", "黄金比例达到一比一。"),
+        )
+        for query, text in cases:
+            with self.subTest(text=text):
+                evidence = result(text)
+                self.assertEqual(
+                    pdf_vector.filter_results_for_intent(query, "source_lookup", [evidence]),
+                    [evidence],
+                )
+
+    def test_derived_unit_fields_cannot_ground_source_anchor(self) -> None:
+        evidence = result("普通课程介绍。")
+        evidence["matched_knowledge_units"] = [
+            {
+                "unit_type": "formula_pattern",
+                "subject": "桂枝汤",
+                "predicate": "主治",
+                "object": "太阳中风",
+                "evidence_quote": "头痛者另论",
+            }
+        ]
+
+        self.assertEqual(
+            pdf_vector.filter_results_for_intent("桂枝汤出处", "source_lookup", [evidence]),
+            [],
+        )
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
+        self.assertEqual(answer["citations"], [])
+        self.assertNotIn("原文摘录", answer["answer"])
+
+    def test_primary_paragraph_or_quote_can_ground_derived_subject(self) -> None:
+        for paragraph, quote in (("桂枝汤主之。", ""), ("普通课程介绍。", "桂枝汤主之。")):
+            with self.subTest(paragraph=paragraph, quote=quote):
+                evidence = result(paragraph)
+                evidence["matched_knowledge_units"] = [
+                    {"subject": "桂枝汤", "evidence_quote": quote}
+                ]
+                answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
+                self.assertTrue(answer["citations"])
+                self.assertIn("桂枝汤", answer["citations"][0]["evidence_quote"])
+
     def test_cough_followups_do_not_inject_unseen_gastrointestinal_clues(self) -> None:
         questions = pdf_vector.build_followup_questions(
             "患者咳嗽、怕冷、无汗",
