@@ -16,6 +16,7 @@ MAX_RERANK_QUERY_CHARS = 2000
 PUBLIC_RERANK_MODEL_MAX_CHARS = 120
 PUBLIC_RERANK_FEATURE_MAX_CHARS = 80
 PUBLIC_RERANK_ERROR_MAX_CHARS = 240
+MAX_SANITIZER_INPUT_CHARS = 16_384
 
 
 class _RerankResponseError(ValueError):
@@ -28,20 +29,32 @@ def sanitize_rerank_error(
     api_key: str | None = None,
     max_chars: int = PUBLIC_RERANK_ERROR_MAX_CHARS,
 ) -> str:
-    if isinstance(error, str):
+    if type(error) is str:
         raw_message = error
     else:
         try:
             raw_message = str(error)
         except Exception:
             raw_message = f"<{type(error).__name__}>"
+    raw_message = raw_message[:MAX_SANITIZER_INPUT_CHARS]
     raw_message = re.sub(
-        r"\x1b\][^\x07\r\n]*(?:\x07|\x1b\\)",
+        r"(?:\x1b\]|\x9d)[^\x07\x9c\x1b\r\n]*(?:\x07|\x9c|\x1b\\)",
         "",
         raw_message,
     )
     raw_message = re.sub(
-        r"\x1b\[[0-?]*[ -/]*[@-~]",
+        r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x9c\x1b\r\n]*(?:\x9c|\x1b\\)",
+        "",
+        raw_message,
+    )
+    raw_message = re.sub(r"(?:\x1b\]|\x9d)[^\r\n]*", "", raw_message)
+    raw_message = re.sub(
+        r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\r\n]*",
+        "",
+        raw_message,
+    )
+    raw_message = re.sub(
+        r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]",
         "",
         raw_message,
     )
@@ -81,6 +94,7 @@ def sanitize_rerank_error(
             | secret
         )
         (?P=key_quote)\s*[:=]\s*
+        (?!\[REDACTED\])
         (?:
             "(?:\\.|[^"])*"
             | '(?:\\.|[^'])*'
@@ -90,10 +104,14 @@ def sanitize_rerank_error(
         r"\g<key>=[REDACTED]",
         message,
     )
-    message = re.sub(r"(?i)\bbearer\s+[^\s,;}\]]+", "Bearer [REDACTED]", message)
+    message = re.sub(
+        r"(?i)\bbearer\s+(?!\[REDACTED\])[^\s,;}\]]+",
+        "Bearer [REDACTED]",
+        message,
+    )
     message = re.sub(r"\bsk-[A-Za-z0-9_-]{6,}\b", "[REDACTED]", message)
     message = re.sub(
-        r"(?i)\b(api[_-]?key|access[_-]?token|token)\s*[:=]\s*[^\s,;}\]]+",
+        r"(?i)\b(api[_-]?key|access[_-]?token|token)\s*[:=]\s*(?!\[REDACTED\])[^\s,;}\]]+",
         r"\1=[REDACTED]",
         message,
     )

@@ -138,6 +138,38 @@ class RerankTests(unittest.TestCase):
         self.assertFalse(credential in multiline)
         self.assertEqual(multiline.count("[REDACTED]"), 1)
 
+    def test_sanitizer_strips_c1_ansi_sequences_before_authorization_matching(self) -> None:
+        credential = "credential-sentinel"
+        messages = (
+            f"Auth\x9b31morization: Basic {credential}",
+            f"Authorization\x9b2K:\x9b0mDigest username={credential}",
+            f"Authorization: Bear\x9b1;31mer {credential}",
+            f"Auth\x9dwindow-title\x9corization: Basic {credential}",
+            f"Authorization:\x9dtitle\x07Digest username={credential}",
+            f"Auth\x90private-data\x9corization: Basic {credential}",
+            f"Authorization:\x9fprivate-data\x1b\\Bearer {credential}",
+        )
+
+        for message in messages:
+            sanitized = sanitize_rerank_error(message)
+            self.assertFalse(credential in sanitized)
+            self.assertEqual(sanitized.count("[REDACTED]"), 1)
+            self.assertFalse("]]" in sanitized)
+
+        long_unterminated = "Auth\x9d" + "x" * 100_000
+        sanitized = sanitize_rerank_error(long_unterminated, max_chars=80)
+        self.assertLessEqual(len(sanitized), 80)
+
+    def test_sanitizer_is_idempotent_for_generic_secret_fields(self) -> None:
+        credential = "credential-sentinel"
+        for key in ("api_key", "token", "access_token"):
+            first = sanitize_rerank_error(f"{key}={credential}")
+            second = sanitize_rerank_error(first)
+            self.assertFalse(credential in first)
+            self.assertTrue(first.endswith("=[REDACTED]"))
+            self.assertFalse("]]" in first)
+            self.assertEqual(first, second)
+
     def test_normalize_rerank_results_uses_exact_bounded_containers(self) -> None:
         class HostileList(list[dict[str, object]]):
             def __getitem__(self, _index: object) -> object:
