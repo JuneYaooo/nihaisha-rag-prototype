@@ -229,12 +229,16 @@ ANSWER_ANCHOR_EXCLUDED_TERMS = {
     "相关线索",
 }
 RELIABLE_SOURCE_NAMED_TERMS = ("木香饼", "一钱", "太阳病", "黄金比例")
-UNRELIABLE_FORMULA_ANCHOR_MARKERS = (
-    "这个", "那个", "哪些", "相关", "如何", "怎么", "什么", "熬", "煮", "的"
+KNOWN_FORMULA_ANCHORS = frozenset(
+    {
+        "桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤", "理中汤",
+        "黄芩加半夏生姜汤", "黄芩汤", "半夏泻心汤", "生姜泻心汤", "甘草泻心汤",
+        "葛根黄芩黄连汤", "白虎汤", "大承气汤", "小承气汤", "调胃承气汤",
+        "小建中汤", "十枣汤", "大柴胡汤", "小青龙汤", "大青龙汤", "吴茱萸汤",
+        "当归四逆汤", "苓桂术甘汤", "茵陈蒿汤", "越婢汤", "旋覆代赭汤",
+        "麦门冬汤", "木防己汤", "百合知母汤", "五苓散", "肾气丸", "麻子仁丸",
+    }
 )
-RELIABLE_TANG_KNOWN_FORMULAS = {
-    "桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤", "理中汤"
-}
 
 
 @dataclass(frozen=True)
@@ -2705,21 +2709,16 @@ def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
 
 def is_reliable_formula_anchor(formula: str) -> bool:
     normalized = normalize_query_text(formula).strip()
-    if len(normalized) < 3:
-        return False
-    if any(marker in normalized for marker in UNRELIABLE_FORMULA_ANCHOR_MARKERS):
-        return False
-    if not re.fullmatch(r"[\u4e00-\u9fff]{2,7}(?:汤|丸|散|饮|膏|丹)", normalized):
-        return False
-    if normalized.endswith("汤"):
-        body = normalized[:-1]
-        return normalized in RELIABLE_TANG_KNOWN_FORMULAS or bool(set(body) & FORMULA_SIGNAL_CHARS)
-    return True
+    return normalized in KNOWN_FORMULA_ANCHORS
+
+
+def reliable_formula_anchors(query: str) -> list[str]:
+    return direct_present_terms(normalize_query_text(query), KNOWN_FORMULA_ANCHORS)
 
 
 def reliable_source_anchors(query: str) -> list[str]:
     normalized = normalize_query_text(query)
-    formulas = [formula for formula in extract_formula_terms(normalized) if is_reliable_formula_anchor(formula)]
+    formulas = reliable_formula_anchors(normalized)
     named = [term for term in RELIABLE_SOURCE_NAMED_TERMS if term in normalized]
     return dedupe_keep_order([*formulas, *named])[:8]
 
@@ -3034,6 +3033,15 @@ def canonical_clinical_clues(text: str) -> list[str]:
         "恶心": "恶心",
         "干呕": "恶心",
         "呕吐": "恶心",
+        "发烧": "发热",
+        "發燒": "发热",
+        "发热": "发热",
+        "咽喉疼痛": "咽痛",
+        "咽痛": "咽痛",
+        "胃口差": "食欲差",
+        "胃口不好": "食欲差",
+        "食欲差": "食欲差",
+        "食欲不振": "食欲差",
     }
     normalized = normalize_query_text(text)
     observed = direct_present_terms(normalized, CLINICAL_EVIDENCE_CLUE_TERMS)
@@ -3226,7 +3234,11 @@ def dosage_evidence_snippet(text: str, max_chars: int = 520) -> str:
     return evidence_quote(text[start:end], max_chars=max_chars)
 
 
-def citation_evidence_for_result(result: dict[str, object], intent: str = "general") -> str:
+def citation_evidence_for_result(
+    result: dict[str, object],
+    intent: str = "general",
+    query: str = "",
+) -> str:
     if intent == "dosage":
         evidence_parts: list[str] = []
         for sentence in split_sentences(str(result.get("text", ""))):
@@ -3240,22 +3252,35 @@ def citation_evidence_for_result(result: dict[str, object], intent: str = "gener
         if evidence:
             return dosage_evidence_snippet(evidence)
 
-    for unit in result.get("matched_knowledge_units", []) or []:
-        evidence = str(unit.get("evidence_quote", "")).strip()
-        if evidence:
-            return evidence
-    return evidence_quote(str(result.get("text", "")), max_chars=220).strip()
+    unit_quotes = [
+        str(unit.get("evidence_quote", "")).strip()
+        for unit in result.get("matched_knowledge_units", []) or []
+        if str(unit.get("evidence_quote", "")).strip()
+    ]
+    paragraph = str(result.get("text", "")).strip()
+    if intent == "source_lookup":
+        anchors = reliable_source_anchors(query)
+        if anchors:
+            for quote in unit_quotes:
+                if all(anchor in quote for anchor in anchors):
+                    return quote
+            if paragraph and all(anchor in paragraph for anchor in anchors):
+                return evidence_quote(paragraph, max_chars=220).strip()
+    if unit_quotes:
+        return unit_quotes[0]
+    return evidence_quote(paragraph, max_chars=220).strip()
 
 
 def build_citations(
     results: list[dict[str, object]],
     max_citations: int = 6,
     intent: str = "general",
+    query: str = "",
 ) -> list[dict[str, object]]:
     citations: list[dict[str, object]] = []
     seen: set[tuple[str, object, str]] = set()
     for result in results:
-        evidence = citation_evidence_for_result(result, intent=intent)
+        evidence = citation_evidence_for_result(result, intent=intent, query=query)
         if not evidence:
             continue
         key = (str(result.get("source_path", "")), result.get("page_start"), evidence)
@@ -3309,9 +3334,7 @@ def filter_results_for_intent(
             result for result in results if all(anchor in result_evidence_text(result) for anchor in anchors)
         ]
     elif intent == "clinical":
-        query_formulas = [
-            formula for formula in extract_formula_terms(query) if is_reliable_formula_anchor(formula)
-        ]
+        query_formulas = reliable_formula_anchors(query)
         query_clues = set(canonical_clinical_clues(query))
         clinical_filtered: list[dict[str, object]] = []
         for result in results:
@@ -3551,6 +3574,7 @@ def synthesize_pdf_rag_answer(
         relevant_results,
         max_citations=max_citations,
         intent=intent,
+        query=query,
     )
     related_knowledge_units = collect_matched_knowledge_units(relevant_results)[:12]
     cited = citations if intent == "dosage" else citations[:3]
@@ -3561,7 +3585,7 @@ def synthesize_pdf_rag_answer(
             safety_notice = with_formula_dosage_safety(
                 "课程资料不能替代诊断；这里不直接给个人处方、剂量或治疗建议。"
             )
-        elif intent == "dosage" or (intent == "source_lookup" and reliable_source_anchors(query)):
+        elif intent == "dosage" or (intent == "source_lookup" and reliable_formula_anchors(query)):
             safety_notice = with_formula_dosage_safety(
                 "这是课程资料整理和出处检索，不是个人用药剂量建议。"
             )
@@ -3594,7 +3618,9 @@ def synthesize_pdf_rag_answer(
             f"[{citation['index']}] {citation['evidence_quote']}" for citation in citations[:4]
         )
         answer = f"关于“{topic}”，当前检索到的原文位置是：{locations}。原文摘录：{excerpts}"
-        has_formula_content = bool(extract_formula_terms(query)) or bool(collect_formula_names(relevant_results))
+        has_formula_content = bool(reliable_formula_anchors(query)) or any(
+            reliable_formula_anchors(result_evidence_text(result)) for result in relevant_results
+        )
         safety_notice = (
             with_formula_dosage_safety("这是原文出处定位和课程整理，不是个人用药建议。")
             if has_formula_content

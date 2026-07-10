@@ -26,6 +26,32 @@ def result(
 
 
 class AnswerQualityTests(unittest.TestCase):
+    def test_reliable_formula_anchors_use_exact_curated_lexicon(self) -> None:
+        known = (
+            "桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤", "理中汤",
+            "黄芩加半夏生姜汤", "黄芩汤", "半夏泻心汤", "生姜泻心汤", "甘草泻心汤",
+            "葛根黄芩黄连汤", "白虎汤", "大承气汤", "小承气汤", "调胃承气汤",
+            "小建中汤", "十枣汤", "大柴胡汤", "小青龙汤", "大青龙汤", "吴茱萸汤",
+            "当归四逆汤", "苓桂术甘汤", "茵陈蒿汤", "越婢汤", "旋覆代赭汤",
+            "麦门冬汤", "木防己汤", "百合知母汤", "五苓散", "肾气丸", "麻子仁丸",
+        )
+        for formula in known:
+            with self.subTest(formula=formula):
+                self.assertEqual(pdf_vector.reliable_source_anchors(f"{formula}出处"), [formula])
+
+        generic = (
+            "红枣汤", "白米汤", "人参鸡汤", "排骨汤", "每天喝白米汤", "小药丸", "护手膏",
+            "喝汤", "鸡汤", "热汤", "一碗汤", "米汤", "煎汤", "喝热汤", "一碗热汤",
+        )
+        for phrase in generic:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(pdf_vector.reliable_source_anchors(f"{phrase}出处"), [])
+
+    def test_food_source_query_does_not_receive_formula_safety_warning(self) -> None:
+        answer = pdf_vector.synthesize_pdf_rag_answer("白米汤出处", [])
+
+        self.assertEqual(answer["safety_notice"], "")
+
     def test_reliable_formula_anchors_reject_natural_language_tang_phrases(self) -> None:
         generic = (
             "这个汤",
@@ -98,6 +124,34 @@ class AnswerQualityTests(unittest.TestCase):
 
         self.assertIn("麻黄汤", answer["answer"])
         self.assertTrue(answer["citations"])
+
+    def test_clinical_synonym_groups_match_bidirectionally(self) -> None:
+        pairs = (
+            ("发烧", "发热"), ("发热", "发烧"), ("發燒", "发热"),
+            ("咽喉疼痛", "咽痛"), ("咽痛", "咽喉疼痛"),
+            ("胃口差", "食欲差"), ("食欲差", "胃口差"),
+            ("胃口不好", "食欲差"), ("食欲差", "胃口不好"),
+            ("食欲不振", "食欲差"), ("食欲差", "食欲不振"),
+        )
+        for query_clue, evidence_clue in pairs:
+            with self.subTest(query=query_clue, evidence=evidence_clue):
+                answer = pdf_vector.synthesize_pdf_rag_answer(
+                    f"患者{query_clue}，课程有哪些线索？",
+                    [result(f"{evidence_clue}，麻黄汤主之。", page=35)],
+                )
+                self.assertIn("麻黄汤", answer["answer"])
+                self.assertTrue(answer["citations"])
+
+    def test_source_citation_prefers_anchor_bearing_paragraph_over_unrelated_unit_quote(self) -> None:
+        evidence = result("太阳中风，桂枝汤主之。")
+        evidence["matched_knowledge_units"] = [
+            {"unit_type": "clinical_pattern", "evidence_quote": "头痛者另论"}
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
+
+        self.assertIn("桂枝汤主之", answer["citations"][0]["evidence_quote"])
+        self.assertNotIn("头痛者另论", answer["citations"][0]["evidence_quote"])
 
     def test_citation_falls_back_to_paragraph_when_unit_quote_is_blank(self) -> None:
         evidence = result("太阳中风，桂枝汤主之。")
