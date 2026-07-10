@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import Iterable
 
 from .fusion import fuse_ranked_channels, merge_unique
+from .faiss_artifacts import (
+    MAX_MAPPING_FILE_BYTES,
+    MAX_MAPPING_LINE_BYTES,
+    MAX_MAPPING_RECORDS,
+    resolve_faiss_artifacts,
+)
 from .normalization import lexical_query_terms, normalize_query_text
 
 
@@ -1264,16 +1270,45 @@ def faiss_matrix(rows: list[list[float]]) -> object:
 
 
 def read_faiss_unit_ids(ids_path: Path) -> list[str]:
-    unit_ids: list[str] = []
-    for line in ids_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        payload = json.loads(line)
-        unit_id = payload["unit_id"]
-        if not isinstance(unit_id, str) or not unit_id.strip():
-            raise ValueError("FAISS unit IDs must be nonempty strings")
-        unit_ids.append(unit_id)
-    return unit_ids
+    try:
+        if ids_path.stat().st_size > MAX_MAPPING_FILE_BYTES:
+            raise ValueError("FAISS ID mapping exceeds safety limit")
+        unit_ids: list[str] = []
+        processed_bytes = 0
+        with ids_path.open("rb") as mapping_file:
+            while True:
+                raw_line = mapping_file.readline(MAX_MAPPING_LINE_BYTES + 1)
+                if not raw_line:
+                    break
+                processed_bytes += len(raw_line)
+                if (
+                    processed_bytes > MAX_MAPPING_FILE_BYTES
+                    or len(raw_line) > MAX_MAPPING_LINE_BYTES
+                    or len(unit_ids) >= MAX_MAPPING_RECORDS
+                ):
+                    raise ValueError("FAISS ID mapping exceeds safety limit")
+                if not raw_line.strip():
+                    continue
+                payload = json.loads(raw_line.decode("utf-8"))
+                unit_id = payload.get("unit_id") if isinstance(payload, dict) else None
+                if not isinstance(unit_id, str) or not unit_id.strip():
+                    raise ValueError("invalid unit ID")
+                unit_ids.append(unit_id)
+        return unit_ids
+    except ValueError as exc:
+        if "safety limit" in str(exc):
+            raise
+        raise ValueError("invalid FAISS ID mapping") from None
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+    ):
+        raise ValueError("invalid FAISS ID mapping") from None
 
 
 FileFingerprint = tuple[str, int, int, int, int, int]
@@ -1297,6 +1332,13 @@ _FAISS_BUNDLE_CACHE_LOCK = threading.RLock()
 _FAISS_VALIDATION_CACHE: OrderedDict[tuple[object, ...], bool] = OrderedDict()
 _FAISS_VALIDATION_CACHE_LIMIT = 16
 _FAISS_VALIDATION_CACHE_LOCK = threading.RLock()
+
+
+def clear_faiss_caches() -> None:
+    with _FAISS_BUNDLE_CACHE_LOCK:
+        with _FAISS_VALIDATION_CACHE_LOCK:
+            _FAISS_BUNDLE_CACHE.clear()
+            _FAISS_VALIDATION_CACHE.clear()
 
 
 def _file_fingerprint(path: Path) -> FileFingerprint:
@@ -1436,8 +1478,8 @@ def build_faiss_vector_index(
     if faiss is None:
         raise RuntimeError('FAISS is required. Install with `pip install ".[faiss]"` or `pip install faiss-cpu`.')
 
-    index_path = index_path or default_faiss_index_path(db_path)
-    ids_path = ids_path or default_faiss_ids_path(db_path)
+    index_path = (index_path or default_faiss_index_path(db_path)).resolve()
+    ids_path = (ids_path or default_faiss_ids_path(db_path)).resolve()
     index_path.parent.mkdir(parents=True, exist_ok=True)
     ids_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2352,8 +2394,24 @@ class LocalVectorStore:
         unit_limit: int,
         faiss_module: object | None = None,
     ) -> list[dict[str, object]] | None:
-        index_path = default_faiss_index_path(self.db_path)
-        ids_path = default_faiss_ids_path(self.db_path)
+        try:
+            meta_rows = conn.execute(
+                "SELECT key, value FROM meta WHERE key IN ('faiss_index', 'faiss_ids')"
+            )
+            artifact_meta = {
+                str(row[0]): row[1]
+                for row in meta_rows
+                if isinstance(row[1], str)
+            }
+            artifacts = resolve_faiss_artifacts(
+                self.db_path,
+                artifact_meta.get("faiss_index"),
+                artifact_meta.get("faiss_ids"),
+            )
+            index_path = artifacts.index
+            ids_path = artifacts.ids
+        except Exception:
+            return None
         if not index_path.exists() or not ids_path.exists():
             return None
         faiss = load_faiss_module() if faiss_module is None else faiss_module
@@ -2400,7 +2458,7 @@ class LocalVectorStore:
                     continue
                 seen_row_indices.add(row_index)
                 scored_unit_ids.append((score, unit_ids[row_index]))
-        except (IndexError, TypeError):
+        except Exception:
             return None
         if not scored_unit_ids:
             return []

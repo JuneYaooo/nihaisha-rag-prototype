@@ -270,6 +270,125 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
 
+    def test_doctor_prefers_sibling_artifacts_without_cwd_dependency(self) -> None:
+        class Index:
+            ntotal = 1
+            d = 2
+
+        class FakeFaiss:
+            def read_index(self, path: str) -> Index:
+                return Index()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            store_dir = base / "data" / "store"
+            store_dir.mkdir(parents=True)
+            db_path = self._create_dense_store(store_dir)
+            (store_dir / "vectors.faiss").write_bytes(b"index")
+            (store_dir / "vector_ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (
+                        ("faiss_index", "data/store/vectors.faiss"),
+                        ("faiss_ids", "data/store/vector_ids.jsonl"),
+                    ),
+                )
+                conn.commit()
+
+            report = doctor(db_path.resolve(), faiss_loader=lambda: FakeFaiss())
+
+        self.assertEqual(report["status"], "ok")
+
+    def test_doctor_selects_only_recognized_metadata_through_read_only_connection(self) -> None:
+        original_connect = sqlite3.connect
+        statements: list[str] = []
+        connect_calls: list[tuple[object, dict[str, object]]] = []
+
+        class TrackingConnection(sqlite3.Connection):
+            def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+                statements.append(sql)
+                return super().execute(sql, parameters)
+
+        def tracking_connect(database: object, **kwargs: object) -> sqlite3.Connection:
+            connect_calls.append((database, dict(kwargs)))
+            kwargs.setdefault("factory", TrackingConnection)
+            return original_connect(database, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+            with patch.object(diagnostics.sqlite3, "connect", side_effect=tracking_connect):
+                report = doctor(db_path, faiss_loader=lambda: None)
+
+        meta_statements = [sql for sql in statements if "FROM meta" in sql]
+        self.assertEqual(report["status"], "ok")
+        self.assertTrue(meta_statements)
+        self.assertTrue(all("WHERE" in sql.upper() for sql in meta_statements))
+        self.assertIn("mode=ro", str(connect_calls[0][0]))
+        self.assertTrue(connect_calls[0][1].get("uri"))
+
+    def test_doctor_ignores_unrelated_huge_metadata_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute("INSERT INTO meta(key, value) VALUES ('unrelated', zeroblob(5000000))")
+                conn.commit()
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        self.assertEqual(report["status"], "ok")
+
+    def test_doctor_rejects_huge_or_nontext_recognized_metadata(self) -> None:
+        for sql in (
+            "UPDATE meta SET value = zeroblob(1000000) WHERE key = 'embedding'",
+            "UPDATE meta SET value = X'00' WHERE key = 'vector_kind'",
+        ):
+            with self.subTest(sql=sql), tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "rag.sqlite"
+                store = LocalVectorStore(db_path)
+                store.recreate()
+                store.rebuild_text_index()
+                store.rebuild_knowledge_units()
+                with closing(sqlite3.connect(db_path)) as conn:
+                    conn.execute(sql)
+                    conn.commit()
+
+                report = doctor(db_path, faiss_loader=lambda: None)
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertIn("meta_invalid", codes)
+
+    def test_doctor_rejects_duplicate_recognized_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executescript(
+                    """
+                    ALTER TABLE meta RENAME TO old_meta;
+                    CREATE TABLE meta(key TEXT, value TEXT);
+                    INSERT INTO meta SELECT key, value FROM old_meta;
+                    INSERT INTO meta(key, value) VALUES ('vector_kind', 'sparse');
+                    DROP TABLE old_meta;
+                    """
+                )
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        codes = {item["code"] for item in report["diagnoses"]}
+        self.assertIn("meta_invalid", codes)
+
     def test_doctor_reports_faiss_dimension_mismatch(self) -> None:
         class Index:
             ntotal = 1

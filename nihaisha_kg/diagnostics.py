@@ -7,6 +7,13 @@ from numbers import Integral
 from pathlib import Path
 from typing import Callable
 
+from .faiss_artifacts import (
+    MAX_MAPPING_FILE_BYTES,
+    MAX_MAPPING_LINE_BYTES,
+    MAX_MAPPING_RECORDS,
+    resolve_faiss_artifacts,
+)
+
 
 REQUIRED_TABLES = (
     "paragraphs",
@@ -15,21 +22,9 @@ REQUIRED_TABLES = (
     "knowledge_units",
 )
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-MAX_MAPPING_FILE_BYTES = 64 * 1024 * 1024
-MAX_MAPPING_LINE_BYTES = 1024 * 1024
-MAX_MAPPING_RECORDS = 500_000
 MAPPING_INSERT_BATCH_SIZE = 1_000
-
-
-def _resolve_artifact_path(db_path: Path, configured: str, default_name: str) -> Path:
-    candidate = Path(configured) if configured else Path(default_name)
-    if candidate.is_absolute():
-        return candidate
-    db_relative = db_path.parent / candidate
-    if configured and not db_relative.exists() and candidate.exists():
-        # Older builds stored paths relative to the build process working directory.
-        return candidate.resolve()
-    return db_relative
+RECOGNIZED_META_KEYS = ("vector_kind", "embedding", "vector_dim", "faiss_index", "faiss_ids")
+MAX_META_VALUE_CHARS = 4096
 
 
 def _strict_index_integer(value: object, *, positive: bool = False) -> int:
@@ -162,11 +157,18 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
     meta: dict[str, str] = {}
     unit_count: int | None = None
     try:
-        with closing(sqlite3.connect(db_path)) as conn:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-            ).fetchall()
-            tables = {str(row[0]) for row in rows}
+        db_uri = db_path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(db_uri, uri=True)) as conn:
+            schema_names = (*REQUIRED_TABLES, "meta")
+            placeholders = ",".join("?" for _ in schema_names)
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    f"""SELECT name FROM sqlite_master
+                    WHERE type IN ('table', 'view') AND name IN ({placeholders})""",
+                    schema_names,
+                )
+            }
             missing_tables = [name for name in REQUIRED_TABLES if name not in tables]
             if missing_tables:
                 add(
@@ -182,12 +184,40 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
                 add("meta_missing", "warning", "metadata table is missing")
             else:
                 try:
-                    meta = {
-                        str(row[0]): str(row[1])
-                        for row in conn.execute("SELECT key, value FROM meta").fetchall()
-                    }
-                    add("meta", "ok", "metadata is readable")
-                except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                    placeholders = ",".join("?" for _ in RECOGNIZED_META_KEYS)
+                    meta_invalid = False
+                    seen_keys: set[str] = set()
+                    query = f"""SELECT key, typeof(value), length(value),
+                        CASE WHEN typeof(value) = 'text' AND length(value) <= ?
+                             THEN value ELSE NULL END
+                        FROM meta WHERE key IN ({placeholders})"""
+                    for key, value_type, value_length, safe_value in conn.execute(
+                        query,
+                        (MAX_META_VALUE_CHARS, *RECOGNIZED_META_KEYS),
+                    ):
+                        if (
+                            not isinstance(key, str)
+                            or key in seen_keys
+                            or value_type != "text"
+                            or not isinstance(value_length, int)
+                            or value_length > MAX_META_VALUE_CHARS
+                            or not isinstance(safe_value, str)
+                        ):
+                            meta_invalid = True
+                            break
+                        seen_keys.add(key)
+                        meta[key] = safe_value
+                    if meta_invalid:
+                        add("meta_invalid", "error", "recognized metadata is invalid")
+                    else:
+                        add("meta", "ok", "metadata is readable")
+                except (
+                    MemoryError,
+                    OverflowError,
+                    sqlite3.DatabaseError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
                     add("meta_invalid", "error", "metadata could not be read", error=type(exc).__name__)
 
             if "retrieval_units" in tables:
@@ -201,7 +231,7 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
                         "retrieval units could not be inspected",
                         error=type(exc).__name__,
                     )
-    except sqlite3.DatabaseError as exc:
+    except (MemoryError, OverflowError, sqlite3.DatabaseError) as exc:
         add("db_invalid_sqlite", "error", "database is not valid readable SQLite", error=type(exc).__name__)
         return report()
 
@@ -235,16 +265,13 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
             return report()
 
     try:
-        index_path = _resolve_artifact_path(
+        artifacts = resolve_faiss_artifacts(
             db_path,
             meta.get("faiss_index", ""),
-            "vectors.faiss",
-        )
-        ids_path = _resolve_artifact_path(
-            db_path,
             meta.get("faiss_ids", ""),
-            "vector_ids.jsonl",
         )
+        index_path = artifacts.index
+        ids_path = artifacts.ids
         artifacts_present = index_path.is_file() and ids_path.is_file()
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         add("faiss_path_invalid", "error", "FAISS artifact paths are invalid", error=type(exc).__name__)

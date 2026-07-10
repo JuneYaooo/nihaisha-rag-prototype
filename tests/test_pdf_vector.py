@@ -51,6 +51,7 @@ from nihaisha_kg.pdf_vector import (
     unpack_dense_vector,
     unpack_sparse_vector,
     load_faiss_bundle,
+    read_faiss_unit_ids,
 )
 
 
@@ -107,9 +108,7 @@ class FakeFaiss:
 
 class PdfVectorTests(unittest.TestCase):
     def setUp(self) -> None:
-        pdf_vector._FAISS_BUNDLE_CACHE.clear()
-        if hasattr(pdf_vector, "_FAISS_VALIDATION_CACHE"):
-            pdf_vector._FAISS_VALIDATION_CACHE.clear()
+        pdf_vector.clear_faiss_caches()
 
     def _assert_unhealthy_faiss_mapping_reaches_dense_guard(
         self,
@@ -163,6 +162,88 @@ class PdfVectorTests(unittest.TestCase):
 
     def test_dense_search_rejects_duplicate_faiss_mapping_ids(self) -> None:
         self._assert_unhealthy_faiss_mapping_reaches_dense_guard(["u-0", "u-0", "u-2"])
+
+    def test_runtime_search_honors_db_relative_custom_faiss_paths(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        unit = RetrievalUnit(
+            unit_id="u-1", paragraph_id="p-a", doc_id="doc", unit_type="sentence",
+            text="桂枝汤", text_for_embedding="桂枝汤", sentence_start=0, sentence_end=0,
+            weight=1.0,
+        )
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            custom = base / "custom"
+            custom.mkdir()
+            index_path = custom / "index.faiss"
+            ids_path = custom / "ids.jsonl"
+            store = LocalVectorStore(
+                base / "rag.sqlite",
+                embedding_backend=ToyDenseBackend(),
+                brute_force_limit=0,
+            )
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units([unit])
+            with store.connect() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (("faiss_index", "custom/index.faiss"), ("faiss_ids", "custom/ids.jsonl")),
+                )
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text('{"unit_id": "u-1"}\n', encoding="utf-8")
+            index = FakeFaissIndex(2)
+            index.add([[1.0, 0.0]])
+            fake_faiss.indexes[str(index_path)] = index
+
+            results = store.search_vector("桂枝汤", faiss_module=fake_faiss)
+
+        self.assertEqual(results[0]["retrieval_sources"], ["faiss"])
+
+    def test_runtime_mapping_loader_streams_without_path_read_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ids_path = Path(tmpdir) / "ids.jsonl"
+            ids_path.write_text('{"unit_id": "u-1"}\n', encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=AssertionError("whole-file read")):
+                unit_ids = read_faiss_unit_ids(ids_path)
+
+        self.assertEqual(unit_ids, ["u-1"])
+
+    def test_runtime_mapping_loader_rejects_oversized_line_and_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            long_line = base / "long.jsonl"
+            long_line.write_bytes(b"x" * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, "safety limit"):
+                read_faiss_unit_ids(long_line)
+
+            huge_file = base / "huge.jsonl"
+            with huge_file.open("wb") as output:
+                output.seek(64 * 1024 * 1024)
+                output.write(b"x")
+            with self.assertRaisesRegex(ValueError, "safety limit"):
+                read_faiss_unit_ids(huge_file)
+
+    def test_runtime_mapping_loader_sanitizes_deep_json_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ids_path = Path(tmpdir) / "ids.jsonl"
+            ids_path.write_text("[" * 10_000 + "0" + "]" * 10_000 + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "invalid FAISS ID mapping"):
+                read_faiss_unit_ids(ids_path)
+
+    def test_faiss_cache_clear_helper_is_available(self) -> None:
+        self.assertTrue(callable(pdf_vector.clear_faiss_caches))
 
     def test_vector_store_rebuilds_guide_nodes_from_original_evidence(self) -> None:
         paragraph = ParsedParagraph(
@@ -2006,9 +2087,40 @@ class PdfVectorTests(unittest.TestCase):
                 ids_path=base / "vector_ids.jsonl",
                 faiss_module=fake_faiss,
             )
-            indexed_vector = fake_faiss.indexes[str(index_path)].vectors[0]
+            indexed_vector = fake_faiss.indexes[str(index_path.resolve())].vectors[0]
 
         self.assertEqual(indexed_vector, [1.0, 0.0])
+
+    def test_build_faiss_vector_index_writes_absolute_artifact_metadata(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+            base = Path(os.path.relpath(tmpdir))
+            db_path = base / "rag.sqlite"
+            store = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(build_retrieval_units([paragraph], window_size=2, overlap=1))
+            (base / "manifest.json").write_text("{}", encoding="utf-8")
+            stats = build_faiss_vector_index(db_path, faiss_module=FakeFaiss())
+            meta = store.read_meta()
+            manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(Path(str(stats["faiss_index"])).is_absolute())
+        self.assertTrue(Path(str(stats["faiss_ids"])).is_absolute())
+        self.assertTrue(Path(meta["faiss_index"]).is_absolute())
+        self.assertTrue(Path(meta["faiss_ids"]).is_absolute())
+        self.assertTrue(Path(manifest["faiss_index"]).is_absolute())
+        self.assertTrue(Path(manifest["faiss_ids"]).is_absolute())
 
     def test_vector_search_uses_faiss_index_when_available(self) -> None:
         paragraph_a = ParsedParagraph(
@@ -2243,6 +2355,25 @@ class PdfVectorTests(unittest.TestCase):
         results = self._search_with_custom_faiss_index(DuplicateIndex(2), ["u-0", "u-1"])
         self.assertEqual(results[0]["hit_count"], 1)
         self.assertEqual(len(results[0]["matched_units"]), 1)
+
+    def test_faiss_search_hostile_iterator_falls_back_safely(self) -> None:
+        class HostileRows:
+            def __getitem__(self, key: int) -> object:
+                class HostileIterator:
+                    def __iter__(self) -> object:
+                        return self
+
+                    def __next__(self) -> object:
+                        raise RuntimeError("hostile iterator secret")
+
+                return HostileIterator()
+
+        class HostileIndex(FakeFaissIndex):
+            def search(self, queries: object, top_k: int) -> tuple[object, object]:
+                return HostileRows(), HostileRows()
+
+        results = self._search_with_custom_faiss_index(HostileIndex(2), ["u-0", "u-1"])
+        self.assertEqual(results[0]["retrieval_sources"], ["vector"])
 
     def _search_with_custom_faiss_index(
         self,
