@@ -1338,6 +1338,69 @@ class PdfVectorTests(unittest.TestCase):
         self.assertNotIn("\x00", metadata["error"])
         self.assertNotIn("Bearer supersecret", metadata["error"])
 
+    def test_answer_pdf_rag_normalizes_hostile_injected_rerank_metadata(self) -> None:
+        candidate = {"paragraph_id": "p1", "text": "证据"}
+        secret = "metadata-secret"
+
+        class RaisingDict(dict[str, object]):
+            def __str__(self) -> str:
+                raise RuntimeError("must not stringify")
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, _query: str, limit: int = 8) -> list[dict[str, object]]:
+                return []
+
+        class HostileOutcome:
+            results = [candidate]
+            model = f'{{"api_key": "{secret}"}}' + "m" * 10_000
+            degraded_feature = "token='feature-secret' " + "d" * 10_000
+            error = RaisingDict(
+                {"authorization": "Bearer object-secret", "candidate": candidate}
+            )
+
+        class HostileReranker:
+            def rerank(self, *_args: object, **_kwargs: object) -> HostileOutcome:
+                return HostileOutcome()
+
+        synthesized = {
+            "query": "问题",
+            "intent": "general",
+            "answer": "已生成",
+            "citations": [],
+            "related_knowledge_units": [],
+            "safety_notice": "",
+            "results": [candidate],
+        }
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesized),
+        ):
+            answer = answer_pdf_rag(
+                "问题",
+                Path("/unused/rag.sqlite"),
+                mode="text",
+                reranker_backend=HostileReranker(),
+            )
+
+        metadata = answer["rerank"]
+        self.assertEqual(set(metadata), {"model", "degraded_feature", "error"})
+        self.assertTrue(all(isinstance(value, str) for value in metadata.values()))
+        self.assertLessEqual(len(metadata["model"]), 120)
+        self.assertLessEqual(len(metadata["degraded_feature"]), 80)
+        self.assertLessEqual(len(metadata["error"]), 240)
+        self.assertNotIn(secret, json.dumps(metadata))
+        self.assertNotIn("feature-secret", json.dumps(metadata))
+        self.assertNotIn("object-secret", json.dumps(metadata))
+        self.assertNotIn("paragraph_id", json.dumps(metadata))
+        json.dumps(answer)
+
     def test_answer_pdf_rag_validates_reranker_before_opening_store(self) -> None:
         with patch("nihaisha_kg.pdf_vector.LocalVectorStore") as store:
             with self.assertRaisesRegex(ValueError, "unsupported reranker"):

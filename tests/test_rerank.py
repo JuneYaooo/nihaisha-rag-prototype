@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import math
 import os
+import traceback
 import unittest
 from unittest.mock import patch
 
-from nihaisha_kg.rerank import SiliconFlowReranker, sanitize_rerank_error
+from nihaisha_kg.rerank import (
+    MAX_RERANK_DOCUMENTS,
+    MAX_RERANK_DOCUMENT_CHARS,
+    MAX_RERANK_QUERY_CHARS,
+    SiliconFlowReranker,
+    sanitize_rerank_error,
+)
 
 
 class FakeResponse:
@@ -38,7 +45,31 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class FakeHttpError(RuntimeError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.response = type("Response", (), {"status_code": status_code})()
+
+
 class RerankTests(unittest.TestCase):
+    def test_sanitizer_redacts_structured_credentials_and_url_userinfo(self) -> None:
+        cases = (
+            ('{"api_key": "unknown-secret"}', "unknown-secret"),
+            ('{"api-key": "hyphen-secret"}', "hyphen-secret"),
+            ("token='unknown secret'", "unknown secret"),
+            ("{'access_token': 'access secret'}", "access secret"),
+            ('{"secret" = "quoted secret"}', "quoted secret"),
+            ('{"authorization": "Bearer nested-secret"}', "nested-secret"),
+            ("https://private-user:private-pass@example.test/path", "private-user"),
+            ("https://private-user:private-pass@example.test/path", "private-pass"),
+        )
+
+        for message, credential in cases:
+            with self.subTest(message=message, credential=credential):
+                sanitized = sanitize_rerank_error(message)
+                self.assertNotIn(credential, sanitized)
+                self.assertIn("[REDACTED]", sanitized)
+
     def test_sanitizer_redacts_quoted_and_unquoted_authorization_values_atomically(self) -> None:
         messages = (
             "Authorization: Bearer supersecret",
@@ -111,13 +142,20 @@ class RerankTests(unittest.TestCase):
             {"paragraph_id": "p2", "text": "丙"},
         ]
 
-        outcome = backend.rerank("问题", candidates, limit=2)
+        outcome = backend.rerank("问题", candidates, limit=3)
 
-        self.assertEqual([row["paragraph_id"] for row in outcome.results], ["p0", "p1"])
-        self.assertEqual([row["rerank_score"] for row in outcome.results], [0.9, 0.9])
+        self.assertEqual([row["paragraph_id"] for row in outcome.results], ["p0", "p1", "p2"])
+        self.assertEqual([row["rerank_score"] for row in outcome.results], [0.9, 0.9, 0.4])
 
     def test_blank_documents_are_omitted_and_response_indices_map_to_original_candidates(self) -> None:
-        session = FakeSession({"results": [{"index": 1, "relevance_score": 0.8}]})
+        session = FakeSession(
+            {
+                "results": [
+                    {"index": 1, "relevance_score": 0.8},
+                    {"index": 0, "relevance_score": 0.2},
+                ]
+            }
+        )
         backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
         candidates = [
             {"paragraph_id": "blank", "title": " ", "text": "\n"},
@@ -156,10 +194,13 @@ class RerankTests(unittest.TestCase):
         self.assertIsNot(outcome.results[0], candidates[0])
         sleep.assert_not_called()
 
-    def test_strict_failure_raises_runtime_error_chained_from_cause(self) -> None:
-        cause = OSError("connection reset")
+    def test_strict_failure_traceback_never_contains_raw_provider_credentials(self) -> None:
+        api_key = "configured-secret"
+        cause = OSError(
+            f'provider failed Authorization="Bearer raw-secret" api_key={api_key}'
+        )
         backend = SiliconFlowReranker(
-            api_key="secret",
+            api_key=api_key,
             session=FakeSession(error=cause),
             max_retries=1,
             strict=True,
@@ -168,7 +209,13 @@ class RerankTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "SiliconFlow rerank request failed") as raised:
             backend.rerank("问题", [{"text": "甲"}], limit=1)
 
-        self.assertIs(raised.exception.__cause__, cause)
+        formatted = "".join(
+            traceback.format_exception(type(raised.exception), raised.exception, raised.exception.__traceback__)
+        )
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertNotIn("raw-secret", formatted)
+        self.assertNotIn(api_key, formatted)
+        self.assertNotIn("Bearer", formatted)
 
     def test_malformed_results_are_rejected_as_a_whole_with_deterministic_fallback(self) -> None:
         malformed_payloads = {
@@ -203,6 +250,51 @@ class RerankTests(unittest.TestCase):
                 self.assertEqual(outcome.degraded_feature, "siliconflow_rerank")
                 self.assertTrue(outcome.error)
 
+    def test_empty_or_partial_success_response_falls_back_without_retry(self) -> None:
+        candidates = [{"paragraph_id": "p1", "text": "甲"}, {"paragraph_id": "p2", "text": "乙"}]
+        payloads = (
+            {"results": []},
+            {"results": [{"index": 0, "relevance_score": 0.8}]},
+        )
+
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                session = FakeSession(payload)
+                backend = SiliconFlowReranker(
+                    api_key="secret",
+                    session=session,
+                    max_retries=3,
+                )
+                with patch("nihaisha_kg.rerank.time.sleep") as sleep:
+                    outcome = backend.rerank("问题", candidates, limit=2)
+                self.assertEqual([row["paragraph_id"] for row in outcome.results], ["p1", "p2"])
+                self.assertEqual(outcome.degraded_feature, "siliconflow_rerank")
+                self.assertEqual(len(session.calls), 1)
+                sleep.assert_not_called()
+
+    def test_retry_policy_stops_on_schema_and_400_but_retries_transport_429_and_5xx(self) -> None:
+        candidates = [{"text": "甲"}]
+        cases = (
+            ("schema", FakeSession({"results": [{}]}), 1),
+            ("http400", FakeSession(error=FakeHttpError(400)), 1),
+            ("http429", FakeSession(error=FakeHttpError(429)), 3),
+            ("http500", FakeSession(error=FakeHttpError(500)), 3),
+            ("transport", FakeSession(error=RuntimeError("offline")), 3),
+        )
+
+        for name, session, expected_calls in cases:
+            with self.subTest(name=name):
+                backend = SiliconFlowReranker(
+                    api_key="secret",
+                    session=session,
+                    max_retries=3,
+                )
+                with patch("nihaisha_kg.rerank.time.sleep") as sleep:
+                    outcome = backend.rerank("问题", candidates, limit=1)
+                self.assertEqual(len(session.calls), expected_calls)
+                self.assertEqual(sleep.call_count, max(0, expected_calls - 1))
+                self.assertEqual(outcome.degraded_feature, "siliconflow_rerank")
+
     def test_empty_candidates_nonpositive_limit_and_all_blank_skip_http(self) -> None:
         session = FakeSession({"results": []})
         backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
@@ -210,6 +302,64 @@ class RerankTests(unittest.TestCase):
         self.assertEqual(backend.rerank("问题", [], limit=2).results, [])
         self.assertEqual(backend.rerank("问题", [{"text": "甲"}], limit=0).results, [])
         self.assertEqual(backend.rerank("问题", [{"title": " ", "text": "\n"}], limit=2).results, [])
+        self.assertEqual(session.calls, [])
+
+    def test_request_caps_query_documents_and_document_characters(self) -> None:
+        session = FakeSession(
+            {
+                "results": [
+                    {"index": index, "relevance_score": float(MAX_RERANK_DOCUMENTS - index)}
+                    for index in range(MAX_RERANK_DOCUMENTS)
+                ]
+            }
+        )
+        backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
+        candidates = [
+            {"paragraph_id": f"p{index}", "title": "标题", "text": "甲" * 5000}
+            for index in range(MAX_RERANK_DOCUMENTS + 5)
+        ]
+
+        outcome = backend.rerank("问" * 3000, candidates, limit=MAX_RERANK_DOCUMENTS + 5)
+
+        payload = session.calls[0][2]
+        self.assertEqual(len(payload["query"]), MAX_RERANK_QUERY_CHARS)
+        self.assertEqual(len(payload["documents"]), MAX_RERANK_DOCUMENTS)
+        self.assertTrue(
+            all(len(document) <= MAX_RERANK_DOCUMENT_CHARS for document in payload["documents"])
+        )
+        self.assertEqual(payload["top_n"], MAX_RERANK_DOCUMENTS)
+        self.assertEqual(len(outcome.results), MAX_RERANK_DOCUMENTS)
+        self.assertEqual(outcome.results[-1]["paragraph_id"], f"p{MAX_RERANK_DOCUMENTS - 1}")
+
+    def test_none_title_and_text_are_empty_and_mapping_is_preserved(self) -> None:
+        session = FakeSession(
+            {
+                "results": [
+                    {"index": 1, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.8},
+                ]
+            }
+        )
+        backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
+        candidates = [
+            {"paragraph_id": "text", "title": None, "text": "正文"},
+            {"paragraph_id": "title", "title": "标题", "text": None},
+            {"paragraph_id": "blank", "title": None, "text": None},
+        ]
+
+        outcome = backend.rerank("问题", candidates, limit=3)
+
+        self.assertEqual(session.calls[0][2]["documents"], ["正文", "标题"])
+        self.assertEqual([row["paragraph_id"] for row in outcome.results], ["title", "text"])
+
+    def test_query_must_be_a_nonempty_string_before_http(self) -> None:
+        session = FakeSession({"results": []})
+        backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
+
+        for query in ("", "   ", None, 123):
+            with self.subTest(query=query):
+                with self.assertRaisesRegex(ValueError, "query"):
+                    backend.rerank(query, [{"text": "甲"}], limit=1)
         self.assertEqual(session.calls, [])
 
     def test_model_precedence_is_explicit_then_environment_then_default(self) -> None:

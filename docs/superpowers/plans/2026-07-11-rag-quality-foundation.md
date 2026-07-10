@@ -997,9 +997,14 @@ Hardening contract: validate resolved `api_key`, `model`, and `base_url` types b
 operations; require nonempty stripped strings and an absolute HTTP(S) base URL; reject boolean,
 non-finite, or nonpositive timeout values and non-integer/nonpositive retry counts. Validate the
 complete provider result array before mapping it, then sort by descending finite relevance score
-with original candidate index as the explicit tie-break. Sanitize every adapter error through the
-shared rerank-error sanitizer, removing credentials and control characters and capping output at
-240 characters.
+with original candidate index as the explicit tie-break, and reject any response that does not
+contain exactly the requested `top_n` unique entries. Bound requests to 100 nonblank documents,
+4,000 characters per document, and 2,000 query characters; treat `None` title/text values as empty.
+Retry only transport-like failures, HTTP 429, and HTTP 5xx; schema errors and other HTTP 4xx stop
+immediately. Sanitize every adapter error through the shared rerank-error sanitizer, removing
+structured credentials, bearer/sk-like tokens, URL userinfo, and control characters and capping
+output at 240 characters. Strict failures raise only the sanitized runtime error with raw provider
+exception context suppressed.
 
 - [x] **Step 4: Rerank once after all query rewrites**
 
@@ -1025,7 +1030,7 @@ Add `reranker_backend: object | None = None`, `reranker: str = "none"`, and `rer
         intent_results = rerank_outcome.results
 ```
 
-Attach only bounded, serializable rerank metadata to the answer as `{"model": ..., "degraded_feature": ..., "error": ...}`; never attach candidate documents or credentials. Sanitize the error again at this public answer boundary, including injected backend outcomes, and cap it at 240 characters. Task 7 can consume this metadata in its trace. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one. Existing direct answer tests pass `reranker="none"`, and orchestration tests inject a fake backend so tests never reach the network.
+Attach only bounded, serializable rerank metadata to the answer as `{"model": ..., "degraded_feature": ..., "error": ...}`; never attach candidate documents or credentials. Normalize all three fields through a helper that does not stringify arbitrary injected objects, with bounds of 120, 80, and 240 characters respectively, and sanitize string values again at this public answer boundary. Task 7 can consume this metadata in its trace. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one. Existing direct answer tests pass `reranker="none"`, and orchestration tests inject a fake backend so tests never reach the network.
 
 - [x] **Step 5: Document environment settings**
 

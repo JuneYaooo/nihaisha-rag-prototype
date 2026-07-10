@@ -10,7 +10,16 @@ from urllib.parse import urlsplit
 
 
 DEFAULT_SILICONFLOW_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+MAX_RERANK_DOCUMENTS = 100
+MAX_RERANK_DOCUMENT_CHARS = 4000
+MAX_RERANK_QUERY_CHARS = 2000
+PUBLIC_RERANK_MODEL_MAX_CHARS = 120
+PUBLIC_RERANK_FEATURE_MAX_CHARS = 80
 PUBLIC_RERANK_ERROR_MAX_CHARS = 240
+
+
+class _RerankResponseError(ValueError):
+    pass
 
 
 def sanitize_rerank_error(
@@ -19,21 +28,35 @@ def sanitize_rerank_error(
     api_key: str | None = None,
     max_chars: int = PUBLIC_RERANK_ERROR_MAX_CHARS,
 ) -> str:
-    message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(error))
+    if isinstance(error, str):
+        raw_message = error
+    else:
+        try:
+            raw_message = str(error)
+        except Exception:
+            raw_message = f"<{type(error).__name__}>"
+    message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", raw_message)
     secrets = [api_key, os.getenv("SILICONFLOW_API_KEY")]
     for secret in secrets:
         if isinstance(secret, str) and secret:
             message = message.replace(secret, "[REDACTED]")
     message = re.sub(
+        r"(?i)\b(https?://)[^/@\s]+@",
+        r"\1[REDACTED]@",
+        message,
+    )
+    message = re.sub(
         r'''(?ix)
-        \bauthorization\s*[:=]\s*
+        (?P<key_quote>["']?)
+        (?P<key>api[_-]?key|access[_-]?token|token|secret|authorization)
+        (?P=key_quote)\s*[:=]\s*
         (?:
             "(?:\\.|[^"])*"
             | '(?:\\.|[^'])*'
             | (?:bearer\s+)?[^\s,;}\]]+
         )
         ''',
-        "Authorization: [REDACTED]",
+        r"\g<key>=[REDACTED]",
         message,
     )
     message = re.sub(r"(?i)\bbearer\s+[^\s,;}\]]+", "Bearer [REDACTED]", message)
@@ -49,6 +72,15 @@ def sanitize_rerank_error(
     if len(message) > max_chars:
         message = message[: max_chars - 1].rstrip() + "…"
     return message
+
+
+def safe_rerank_metadata_value(value: object, *, max_chars: int) -> str:
+    if value is None or max_chars <= 0:
+        return ""
+    if not isinstance(value, str):
+        marker = f"<{type(value).__name__}>"
+        return marker[:max_chars]
+    return sanitize_rerank_error(value, max_chars=max_chars)
 
 
 @dataclass(frozen=True)
@@ -126,15 +158,22 @@ class SiliconFlowReranker:
         candidates: Sequence[dict[str, object]],
         limit: int,
     ) -> RerankOutcome:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a nonempty string")
         if not candidates or limit <= 0:
             return RerankOutcome(results=[], model=self.model)
 
+        bounded_query = query.strip()[:MAX_RERANK_QUERY_CHARS]
         documents: list[str] = []
         original_indices: list[int] = []
         for original_index, candidate in enumerate(candidates):
-            title = str(candidate.get("title", "")).strip()
-            text = str(candidate.get("text", "")).strip()
-            document = "\n".join(part for part in (title, text) if part)
+            if len(documents) >= MAX_RERANK_DOCUMENTS:
+                break
+            raw_title = candidate.get("title", "")
+            raw_text = candidate.get("text", "")
+            title = "" if raw_title is None else str(raw_title).strip()
+            text = "" if raw_text is None else str(raw_text).strip()
+            document = "\n".join(part for part in (title, text) if part)[:MAX_RERANK_DOCUMENT_CHARS]
             if not document:
                 continue
             documents.append(document)
@@ -145,7 +184,7 @@ class SiliconFlowReranker:
         top_n = min(limit, len(documents))
         payload: dict[str, object] = {
             "model": self.model,
-            "query": query,
+            "query": bounded_query,
             "documents": documents,
             "return_documents": False,
             "top_n": top_n,
@@ -170,8 +209,12 @@ class SiliconFlowReranker:
                     timeout=self.timeout,
                 )
                 response.raise_for_status()
+                try:
+                    response_payload = response.json()
+                except Exception:
+                    raise _RerankResponseError("rerank response body must be valid JSON") from None
                 ranked = self._validated_results(
-                    response.json(),
+                    response_payload,
                     candidates=candidates,
                     original_indices=original_indices,
                     limit=top_n,
@@ -179,14 +222,16 @@ class SiliconFlowReranker:
                 return RerankOutcome(results=ranked, model=self.model)
             except Exception as exc:
                 last_error = exc
-                if attempt + 1 < self.max_retries:
+                if attempt + 1 < self.max_retries and self._is_retryable_error(exc):
                     time.sleep(1.5 * (attempt + 1))
+                    continue
+                break
 
         assert last_error is not None
         if self.strict:
             raise RuntimeError(
                 f"SiliconFlow rerank request failed: {self._safe_error(last_error)}"
-            ) from last_error
+            ) from None
         return RerankOutcome(
             results=[dict(candidate) for candidate in candidates[:limit]],
             model=self.model,
@@ -203,33 +248,37 @@ class SiliconFlowReranker:
         limit: int,
     ) -> list[dict[str, object]]:
         if not isinstance(payload, Mapping):
-            raise ValueError("rerank response must be an object")
+            raise _RerankResponseError("rerank response must be an object")
         raw_results = payload.get("results")
         if not isinstance(raw_results, list):
-            raise ValueError("rerank response results must be a list")
+            raise _RerankResponseError("rerank response results must be a list")
 
         validated: list[tuple[int, float]] = []
         seen_indices: set[int] = set()
         for item in raw_results:
             if not isinstance(item, Mapping):
-                raise ValueError("rerank result must be an object")
+                raise _RerankResponseError("rerank result must be an object")
             index = item.get("index")
             if isinstance(index, bool) or not isinstance(index, int):
-                raise ValueError("rerank result index must be an integer")
+                raise _RerankResponseError("rerank result index must be an integer")
             if index < 0 or index >= len(original_indices):
-                raise ValueError("rerank result index is out of range")
+                raise _RerankResponseError("rerank result index is out of range")
             if index in seen_indices:
-                raise ValueError("rerank result indices must be unique")
+                raise _RerankResponseError("rerank result indices must be unique")
             seen_indices.add(index)
 
             score = item.get("relevance_score")
             if isinstance(score, bool) or not isinstance(score, (int, float)):
-                raise ValueError("rerank relevance_score must be numeric")
+                raise _RerankResponseError("rerank relevance_score must be numeric")
             score_value = float(score)
             if not math.isfinite(score_value):
-                raise ValueError("rerank relevance_score must be finite")
+                raise _RerankResponseError("rerank relevance_score must be finite")
             validated.append((index, score_value))
 
+        if len(validated) != limit:
+            raise _RerankResponseError(
+                f"rerank response returned {len(validated)} results; expected {limit}"
+            )
         validated.sort(key=lambda pair: (-pair[1], original_indices[pair[0]]))
         ranked: list[dict[str, object]] = []
         for document_index, score in validated[:limit]:
@@ -240,3 +289,15 @@ class SiliconFlowReranker:
 
     def _safe_error(self, error: Exception) -> str:
         return sanitize_rerank_error(error, api_key=self.api_key)
+
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        if isinstance(error, _RerankResponseError):
+            return False
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code is None:
+            status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int) and not isinstance(status_code, bool):
+            return status_code == 429 or status_code >= 500
+        return True
