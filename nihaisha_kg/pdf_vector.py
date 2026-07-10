@@ -1589,13 +1589,21 @@ class LocalVectorStore:
         conn: sqlite3.Connection,
         keys: tuple[str, ...],
     ) -> dict[str, str]:
-        placeholders = ",".join("?" for _ in keys)
-        query = f"""SELECT key, typeof(value), length(value),
-            CASE WHEN typeof(value) = 'text' AND length(value) <= ?
-                 THEN value ELSE NULL END
-            FROM meta WHERE key IN ({placeholders})"""
-        metadata: dict[str, str] = {}
         try:
+            meta_object = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name = 'meta'"
+            ).fetchone()
+            if meta_object is None:
+                return {}
+            if meta_object[0] != "table":
+                raise RuntimeError("database metadata is invalid")
+            placeholders = ",".join("?" for _ in keys)
+            query = f"""SELECT key, typeof(value), length(CAST(value AS BLOB)),
+                CASE WHEN typeof(value) = 'text'
+                           AND length(CAST(value AS BLOB)) <= ?
+                     THEN value ELSE NULL END
+                FROM meta WHERE key IN ({placeholders})"""
+            metadata: dict[str, str] = {}
             for key, value_type, value_length, safe_value in conn.execute(
                 query,
                 (MAX_RUNTIME_META_VALUE_CHARS, *keys),
@@ -1610,8 +1618,6 @@ class LocalVectorStore:
                 ):
                     raise RuntimeError("database metadata is invalid")
                 metadata[key] = safe_value
-        except sqlite3.OperationalError:
-            return {}
         except (MemoryError, OverflowError, sqlite3.DatabaseError, TypeError, ValueError):
             raise RuntimeError("database metadata is invalid") from None
         return metadata

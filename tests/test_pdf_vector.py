@@ -250,6 +250,64 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("metadata", str(raised.exception).lower())
         self.assertLess(len(str(raised.exception)), 200)
 
+    def test_vector_search_rejects_invalid_utf8_metadata_without_leaking_decoder_error(self) -> None:
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(
+                Path(tmpdir) / "rag.sqlite",
+                embedding_backend=ToyDenseBackend(),
+            )
+            store.recreate()
+            with store.connect() as conn:
+                conn.execute(
+                    "UPDATE meta SET value = CAST(X'80' AS TEXT) WHERE key = 'vector_kind'"
+                )
+
+            with self.assertRaises(RuntimeError) as raised:
+                store.search_vector("桂枝汤")
+
+        message = str(raised.exception)
+        self.assertEqual(message, "database metadata is invalid")
+        self.assertNotIn("decode", message.lower())
+
+    def test_bounded_metadata_reader_rejects_malformed_meta_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            with store.connect() as conn:
+                conn.executescript("DROP TABLE meta; CREATE TABLE meta(unexpected TEXT);")
+
+            with self.assertRaisesRegex(RuntimeError, "^database metadata is invalid$"):
+                store.read_meta_keys(("vector_kind",))
+
+    def test_bounded_metadata_reader_allows_absent_meta_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            with store.connect() as conn:
+                conn.execute("DROP TABLE meta")
+
+            metadata = store.read_meta_keys(("vector_kind",))
+
+        self.assertEqual(metadata, {})
+
+    def test_bounded_metadata_reader_rejects_meta_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            with store.connect() as conn:
+                conn.executescript(
+                    "DROP TABLE meta; CREATE VIEW meta AS SELECT 'vector_kind' AS key, 'sparse' AS value;"
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "^database metadata is invalid$"):
+                store.read_meta_keys(("vector_kind",))
+
     def test_runtime_mapping_loader_streams_without_path_read_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ids_path = Path(tmpdir) / "ids.jsonl"
