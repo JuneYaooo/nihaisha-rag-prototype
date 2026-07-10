@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
+import sqlite3
 import tempfile
+import time
 import unittest
-from contextlib import redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from nihaisha_kg import pdf_vector
 from nihaisha_kg import cli as rag_cli
 from nihaisha_kg.rerank import RerankOutcome
 from nihaisha_kg.pdf_vector import (
@@ -65,6 +70,10 @@ class FakeFaissIndex:
     def ntotal(self) -> int:
         return len(self.vectors)
 
+    @property
+    def d(self) -> int:
+        return self.dims
+
     def search(self, queries: object, top_k: int) -> tuple[list[list[float]], list[list[int]]]:
         if hasattr(queries, "tolist"):
             query = queries.tolist()[0]
@@ -97,6 +106,11 @@ class FakeFaiss:
 
 
 class PdfVectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        pdf_vector._FAISS_BUNDLE_CACHE.clear()
+        if hasattr(pdf_vector, "_FAISS_VALIDATION_CACHE"):
+            pdf_vector._FAISS_VALIDATION_CACHE.clear()
+
     def _assert_unhealthy_faiss_mapping_reaches_dense_guard(
         self,
         mapped_unit_ids: list[str],
@@ -2070,6 +2084,207 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertIsNot(second, third)
         self.assertEqual(fake_faiss.read_count, 2)
+
+    def test_faiss_bundle_cache_separates_loader_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            loader_a = FakeFaiss()
+            loader_b = FakeFaiss()
+            loader_a.indexes[str(index_path)] = FakeFaissIndex(2)
+            loader_b.indexes[str(index_path)] = FakeFaissIndex(3)
+
+            bundle_a = load_faiss_bundle(index_path, ids_path, loader_a)
+            bundle_b = load_faiss_bundle(index_path, ids_path, loader_b)
+
+        self.assertIs(bundle_a[0], loader_a.indexes[str(index_path)])
+        self.assertIs(bundle_b[0], loader_b.indexes[str(index_path)])
+        self.assertEqual(loader_a.read_count, 1)
+        self.assertEqual(loader_b.read_count, 1)
+
+    def test_faiss_bundle_cache_detects_same_size_replacement_with_restored_mtime(self) -> None:
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            fake_faiss.indexes[str(index_path)] = FakeFaissIndex(2)
+            first = load_faiss_bundle(index_path, ids_path, fake_faiss)
+            original = ids_path.stat()
+            original_fingerprint = pdf_vector._file_fingerprint(ids_path)
+            replacement = base / "replacement.jsonl"
+            replacement.write_text('{"unit_id": "u2"}\n', encoding="utf-8")
+            os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+            os.replace(replacement, ids_path)
+            self.assertEqual(ids_path.stat().st_size, original.st_size)
+            self.assertEqual(ids_path.stat().st_mtime_ns, original.st_mtime_ns)
+            self.assertNotEqual(pdf_vector._file_fingerprint(ids_path), original_fingerprint)
+
+            second = load_faiss_bundle(index_path, ids_path, fake_faiss)
+
+        self.assertIsNot(first, second)
+        self.assertEqual(second[1], ["u2"])
+        self.assertEqual(fake_faiss.read_count, 2)
+
+    def test_faiss_bundle_cache_serializes_concurrent_loads(self) -> None:
+        class SlowFakeFaiss(FakeFaiss):
+            def read_index(self, path: str) -> FakeFaissIndex:
+                time.sleep(0.02)
+                return super().read_index(path)
+
+        fake_faiss = SlowFakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            expected = FakeFaissIndex(2)
+            fake_faiss.indexes[str(index_path)] = expected
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                bundles = list(
+                    executor.map(
+                        lambda _: load_faiss_bundle(index_path, ids_path, fake_faiss),
+                        range(16),
+                    )
+                )
+
+        self.assertTrue(all(bundle[0] is expected for bundle in bundles))
+        self.assertEqual(fake_faiss.read_count, 1)
+
+    def test_faiss_bundle_cache_retains_only_one_large_index(self) -> None:
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            for name in ("one", "two"):
+                directory = base / name
+                directory.mkdir()
+                index_path = directory / "vectors.faiss"
+                ids_path = directory / "vector_ids.jsonl"
+                index_path.write_text("index", encoding="utf-8")
+                ids_path.write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+                fake_faiss.indexes[str(index_path)] = FakeFaissIndex(2)
+                load_faiss_bundle(index_path, ids_path, fake_faiss)
+
+        self.assertEqual(len(pdf_vector._FAISS_BUNDLE_CACHE), 1)
+
+    def test_faiss_exact_id_audit_is_cached_until_artifact_or_database_changes(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        unit = RetrievalUnit(
+            unit_id="u-1", paragraph_id="p-a", doc_id="doc", unit_type="sentence",
+            text="桂枝汤", text_for_embedding="桂枝汤", sentence_start=0, sentence_end=0,
+            weight=1.0,
+        )
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            store = LocalVectorStore(base / "rag.sqlite", embedding_backend=ToyDenseBackend())
+            store.recreate()
+            with store.connect() as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+            store.insert_paragraphs([paragraph])
+            store.insert_units([unit])
+            build_faiss_vector_index(store.db_path, faiss_module=fake_faiss)
+            with patch.object(
+                pdf_vector,
+                "_audit_faiss_bundle_ids",
+                wraps=pdf_vector._audit_faiss_bundle_ids,
+            ) as audit:
+                store.search_vector("桂枝汤", faiss_module=fake_faiss)
+                store.search_vector("桂枝汤", faiss_module=fake_faiss)
+                self.assertEqual(audit.call_count, 1)
+
+                ids_path = base / "vector_ids.jsonl"
+                old_mtime = ids_path.stat().st_mtime_ns
+                ids_path.write_text('{"unit_id": "u-1"}\n\n', encoding="utf-8")
+                os.utime(ids_path, ns=(old_mtime + 1_000_000, old_mtime + 1_000_000))
+                store.search_vector("桂枝汤", faiss_module=fake_faiss)
+                self.assertEqual(audit.call_count, 2)
+
+                database_fingerprint = pdf_vector._database_revision_fingerprint(store.db_path)
+                with closing(sqlite3.connect(store.db_path)) as writer:
+                    writer.execute("UPDATE retrieval_units SET text = text || ' changed'")
+                    writer.commit()
+                    self.assertNotEqual(
+                        pdf_vector._database_revision_fingerprint(store.db_path),
+                        database_fingerprint,
+                    )
+                    store.search_vector("桂枝汤", faiss_module=fake_faiss)
+                self.assertEqual(audit.call_count, 3)
+
+    def test_faiss_search_rejects_nonfinite_scores(self) -> None:
+        class NonfiniteIndex(FakeFaissIndex):
+            def search(self, queries: object, top_k: int) -> tuple[list[list[float]], list[list[int]]]:
+                return [[math.nan, math.inf]], [[0, 1]]
+
+        results = self._search_with_custom_faiss_index(NonfiniteIndex(2), ["u-0", "u-1"])
+        self.assertEqual(results, [])
+
+    def test_faiss_search_deduplicates_returned_row_indices(self) -> None:
+        class DuplicateIndex(FakeFaissIndex):
+            def search(self, queries: object, top_k: int) -> tuple[list[list[float]], list[list[int]]]:
+                return [[0.9, 0.8]], [[0, 0]]
+
+        results = self._search_with_custom_faiss_index(DuplicateIndex(2), ["u-0", "u-1"])
+        self.assertEqual(results[0]["hit_count"], 1)
+        self.assertEqual(len(results[0]["matched_units"]), 1)
+
+    def _search_with_custom_faiss_index(
+        self,
+        index: FakeFaissIndex,
+        unit_ids: list[str],
+    ) -> list[dict[str, object]]:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        units = [
+            RetrievalUnit(
+                unit_id=unit_id, paragraph_id="p-a", doc_id="doc", unit_type="sentence",
+                text=unit_id, text_for_embedding=unit_id, sentence_start=offset,
+                sentence_end=offset, weight=1.0,
+            )
+            for offset, unit_id in enumerate(unit_ids)
+        ]
+        index.add([[1.0, 0.0] for _ in unit_ids])
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            store = LocalVectorStore(base / "rag.sqlite", embedding_backend=ToyDenseBackend())
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(units)
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text(
+                "\n".join(json.dumps({"unit_id": unit_id}) for unit_id in unit_ids) + "\n",
+                encoding="utf-8",
+            )
+            fake_faiss.indexes[str(index_path)] = index
+            return store.search_vector("桂枝汤", faiss_module=fake_faiss)
 
     def test_dense_search_refuses_large_brute_force_scan_without_faiss(self) -> None:
         paragraph = ParsedParagraph(

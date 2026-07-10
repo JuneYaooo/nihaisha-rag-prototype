@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
+from nihaisha_kg import diagnostics
 from nihaisha_kg.diagnostics import doctor
-from nihaisha_kg.pdf_vector import DenseEmbeddingBackend, LocalVectorStore
+from nihaisha_kg.pdf_vector import DenseEmbeddingBackend, LocalVectorStore, RetrievalUnit
 
 
 class ToyDenseBackend(DenseEmbeddingBackend):
@@ -19,6 +22,25 @@ class ToyDenseBackend(DenseEmbeddingBackend):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def _create_dense_store(self, base: Path) -> Path:
+        db_path = base / "rag.sqlite"
+        store = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
+        store.recreate()
+        paragraph = diagnostics_test_paragraph()
+        store.insert_paragraphs([paragraph])
+        store.insert_units(
+            [
+                RetrievalUnit(
+                    unit_id="u1", paragraph_id=paragraph.paragraph_id, doc_id=paragraph.doc_id,
+                    unit_type="sentence", text="桂枝汤", text_for_embedding="桂枝汤",
+                    sentence_start=0, sentence_end=0, weight=1.0,
+                )
+            ]
+        )
+        store.rebuild_text_index()
+        store.rebuild_knowledge_units()
+        return db_path
+
     def test_doctor_reports_dense_database_with_missing_faiss_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "rag.sqlite"
@@ -130,6 +152,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_doctor_reports_mapping_count_and_index_count_mismatch(self) -> None:
         class Index:
             ntotal = 1
+            d = 2
 
         class FakeFaiss:
             def read_index(self, path: str) -> Index:
@@ -160,6 +183,142 @@ class DiagnosticsTests(unittest.TestCase):
         codes = {item["code"] for item in report["diagnoses"]}
         self.assertIn("faiss_mapping_count_mismatch", codes)
         self.assertIn("faiss_index_count_mismatch", codes)
+
+    def test_doctor_streams_deeply_nested_json_as_structured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = self._create_dense_store(base)
+            (base / "vectors.faiss").write_bytes(b"index")
+            (base / "vector_ids.jsonl").write_text("[" * 10_000 + "0" + "]" * 10_000 + "\n")
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        codes = {item["code"] for item in report["diagnoses"]}
+        self.assertIn("faiss_mapping_invalid", codes)
+
+    def test_doctor_rejects_oversized_mapping_line_and_file(self) -> None:
+        for limit_name in ("MAX_MAPPING_LINE_BYTES", "MAX_MAPPING_FILE_BYTES"):
+            with self.subTest(limit_name=limit_name), tempfile.TemporaryDirectory() as tmpdir:
+                base = Path(tmpdir)
+                db_path = self._create_dense_store(base)
+                (base / "vectors.faiss").write_bytes(b"index")
+                (base / "vector_ids.jsonl").write_bytes(b"x" * 128)
+                with patch.object(diagnostics, limit_name, 64):
+                    report = doctor(db_path, faiss_loader=lambda: None)
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertIn("faiss_mapping_limits_exceeded", codes)
+
+    def test_doctor_honors_relative_custom_faiss_paths(self) -> None:
+        class Index:
+            ntotal = 1
+            d = 2
+
+        class FakeFaiss:
+            def read_index(self, path: str) -> Index:
+                return Index()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = self._create_dense_store(base)
+            custom = base / "custom"
+            custom.mkdir()
+            (custom / "index.faiss").write_bytes(b"index")
+            (custom / "ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (("faiss_index", "custom/index.faiss"), ("faiss_ids", "custom/ids.jsonl")),
+                )
+                conn.commit()
+
+            report = doctor(db_path, faiss_loader=lambda: FakeFaiss())
+
+        self.assertEqual(report["status"], "ok")
+
+    def test_doctor_honors_legacy_cwd_relative_paths_written_by_builder(self) -> None:
+        class Index:
+            ntotal = 1
+            d = 2
+
+        class FakeFaiss:
+            def read_index(self, path: str) -> Index:
+                return Index()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            store_dir = base / "store"
+            store_dir.mkdir()
+            db_path = self._create_dense_store(store_dir)
+            (store_dir / "vectors.faiss").write_bytes(b"index")
+            (store_dir / "vector_ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (
+                        ("faiss_index", "store/vectors.faiss"),
+                        ("faiss_ids", "store/vector_ids.jsonl"),
+                    ),
+                )
+                conn.commit()
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(base)
+                report = doctor(db_path, faiss_loader=lambda: FakeFaiss())
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(report["status"], "ok")
+
+    def test_doctor_reports_faiss_dimension_mismatch(self) -> None:
+        class Index:
+            ntotal = 1
+            d = 3
+
+        class FakeFaiss:
+            def read_index(self, path: str) -> Index:
+                return Index()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = self._create_dense_store(base)
+            (base / "vectors.faiss").write_bytes(b"index")
+            (base / "vector_ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            report = doctor(db_path, faiss_loader=lambda: FakeFaiss())
+
+        codes = {item["code"] for item in report["diagnoses"]}
+        self.assertIn("faiss_index_dimension_mismatch", codes)
+
+    def test_doctor_rejects_nonintegral_faiss_counts(self) -> None:
+        for ntotal in (True, "1", 1.5, -1):
+            with self.subTest(ntotal=ntotal), tempfile.TemporaryDirectory() as tmpdir:
+                class Index:
+                    d = 2
+
+                index = Index()
+                index.ntotal = ntotal
+
+                class FakeFaiss:
+                    def read_index(self, path: str) -> Index:
+                        return index
+
+                base = Path(tmpdir)
+                db_path = self._create_dense_store(base)
+                (base / "vectors.faiss").write_bytes(b"index")
+                (base / "vector_ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+                report = doctor(db_path, faiss_loader=lambda: FakeFaiss())
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertIn("faiss_index_invalid", codes)
+
+
+def diagnostics_test_paragraph():
+    from nihaisha_kg.pdf_vector import ParsedParagraph
+
+    return ParsedParagraph(
+        paragraph_id="p1", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+        page_start=1, page_end=1, text="桂枝汤主之。",
+    )
 
 
 if __name__ == "__main__":

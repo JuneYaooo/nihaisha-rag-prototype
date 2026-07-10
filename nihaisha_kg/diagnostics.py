@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from numbers import Integral
 from pathlib import Path
 from typing import Callable
 
@@ -14,6 +15,102 @@ REQUIRED_TABLES = (
     "knowledge_units",
 )
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+MAX_MAPPING_FILE_BYTES = 64 * 1024 * 1024
+MAX_MAPPING_LINE_BYTES = 1024 * 1024
+MAX_MAPPING_RECORDS = 500_000
+MAPPING_INSERT_BATCH_SIZE = 1_000
+
+
+def _resolve_artifact_path(db_path: Path, configured: str, default_name: str) -> Path:
+    candidate = Path(configured) if configured else Path(default_name)
+    if candidate.is_absolute():
+        return candidate
+    db_relative = db_path.parent / candidate
+    if configured and not db_relative.exists() and candidate.exists():
+        # Older builds stored paths relative to the build process working directory.
+        return candidate.resolve()
+    return db_relative
+
+
+def _strict_index_integer(value: object, *, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError("index metadata must be integral")
+    parsed = int(value)
+    if parsed < (1 if positive else 0):
+        raise ValueError("index metadata is out of range")
+    return parsed
+
+
+def _inspect_mapping(db_path: Path, ids_path: Path) -> dict[str, object]:
+    """Stream and exactly compare a mapping using a disk-backed temporary SQLite table."""
+    try:
+        file_size = ids_path.stat().st_size
+        if file_size > MAX_MAPPING_FILE_BYTES:
+            return {"error": "limits", "bytes": file_size}
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.execute("PRAGMA temp_store=FILE")
+            conn.execute("CREATE TEMP TABLE doctor_mapping_ids(unit_id TEXT PRIMARY KEY)")
+            batch: list[tuple[str]] = []
+            count = 0
+            processed_bytes = 0
+            with ids_path.open("rb") as mapping_file:
+                while True:
+                    raw_line = mapping_file.readline(MAX_MAPPING_LINE_BYTES + 1)
+                    if not raw_line:
+                        break
+                    processed_bytes += len(raw_line)
+                    if processed_bytes > MAX_MAPPING_FILE_BYTES:
+                        return {"error": "limits", "bytes": processed_bytes}
+                    if len(raw_line) > MAX_MAPPING_LINE_BYTES:
+                        return {"error": "limits", "line": count + 1}
+                    if not raw_line.strip():
+                        continue
+                    if count >= MAX_MAPPING_RECORDS:
+                        return {"error": "limits", "records": count}
+                    payload = json.loads(raw_line.decode("utf-8"))
+                    unit_id = payload.get("unit_id") if isinstance(payload, dict) else None
+                    if not isinstance(unit_id, str) or not unit_id.strip():
+                        raise ValueError("invalid unit ID")
+                    batch.append((unit_id,))
+                    count += 1
+                    if len(batch) >= MAPPING_INSERT_BATCH_SIZE:
+                        conn.executemany(
+                            "INSERT INTO doctor_mapping_ids(unit_id) VALUES (?)",
+                            batch,
+                        )
+                        batch.clear()
+            if batch:
+                conn.executemany("INSERT INTO doctor_mapping_ids(unit_id) VALUES (?)", batch)
+            unknown = conn.execute(
+                """
+                SELECT 1 FROM doctor_mapping_ids AS m
+                LEFT JOIN retrieval_units AS r ON r.unit_id = m.unit_id
+                WHERE r.unit_id IS NULL LIMIT 1
+                """
+            ).fetchone()
+            missing = conn.execute(
+                """
+                SELECT 1 FROM retrieval_units AS r
+                LEFT JOIN doctor_mapping_ids AS m ON m.unit_id = r.unit_id
+                WHERE m.unit_id IS NULL LIMIT 1
+                """
+            ).fetchone()
+            return {"count": count, "ids_mismatch": unknown is not None or missing is not None}
+    except sqlite3.IntegrityError:
+        return {"error": "duplicate"}
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        sqlite3.DatabaseError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        return {"error": "invalid", "exception": type(exc).__name__}
 
 
 def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str, object]:
@@ -64,7 +161,6 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
 
     meta: dict[str, str] = {}
     unit_count: int | None = None
-    sqlite_unit_ids: set[str] | None = None
     try:
         with closing(sqlite3.connect(db_path)) as conn:
             rows = conn.execute(
@@ -97,10 +193,6 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
             if "retrieval_units" in tables:
                 try:
                     unit_count = int(conn.execute("SELECT COUNT(*) FROM retrieval_units").fetchone()[0])
-                    sqlite_unit_ids = {
-                        str(row[0])
-                        for row in conn.execute("SELECT unit_id FROM retrieval_units").fetchall()
-                    }
                     add("retrieval_units", "ok", "retrieval-unit count is readable", count=unit_count)
                 except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
                     add(
@@ -142,9 +234,21 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
         else:
             return report()
 
-    index_path = db_path.with_name("vectors.faiss")
-    ids_path = db_path.with_name("vector_ids.jsonl")
-    artifacts_present = index_path.is_file() and ids_path.is_file()
+    try:
+        index_path = _resolve_artifact_path(
+            db_path,
+            meta.get("faiss_index", ""),
+            "vectors.faiss",
+        )
+        ids_path = _resolve_artifact_path(
+            db_path,
+            meta.get("faiss_ids", ""),
+            "vector_ids.jsonl",
+        )
+        artifacts_present = index_path.is_file() and ids_path.is_file()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        add("faiss_path_invalid", "error", "FAISS artifact paths are invalid", error=type(exc).__name__)
+        return report()
     if not metadata_valid:
         if not ids_path.is_file():
             return report()
@@ -155,40 +259,38 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
     else:
         return report()
 
-    mapping_ids: list[str] | None = None
+    mapping_count: int | None = None
     if ids_path.is_file():
-        try:
-            mapping_ids = []
-            for line_number, line in enumerate(ids_path.read_text(encoding="utf-8").splitlines(), 1):
-                if not line.strip():
-                    continue
-                payload = json.loads(line)
-                unit_id = payload.get("unit_id") if isinstance(payload, dict) else None
-                if not isinstance(unit_id, str) or not unit_id.strip():
-                    raise ValueError(f"invalid unit_id at line {line_number}")
-                mapping_ids.append(unit_id)
-            if len(mapping_ids) != len(set(mapping_ids)):
-                add("faiss_mapping_duplicate_ids", "error", "FAISS ID mapping contains duplicate IDs")
-            else:
-                add("faiss_mapping", "ok", "FAISS ID mapping is readable", count=len(mapping_ids))
-            if unit_count is not None and len(mapping_ids) != unit_count:
+        inspection = _inspect_mapping(db_path, ids_path)
+        error = inspection.get("error")
+        if error == "limits":
+            add(
+                "faiss_mapping_limits_exceeded",
+                "error",
+                "FAISS ID mapping exceeds diagnostic safety limits",
+            )
+        elif error == "duplicate":
+            add("faiss_mapping_duplicate_ids", "error", "FAISS ID mapping contains duplicate IDs")
+        elif error:
+            add(
+                "faiss_mapping_invalid",
+                "error",
+                "FAISS ID mapping could not be parsed",
+                error=str(inspection.get("exception", "InvalidMapping")),
+            )
+        else:
+            mapping_count = int(inspection["count"])
+            add("faiss_mapping", "ok", "FAISS ID mapping is readable", count=mapping_count)
+            if unit_count is not None and mapping_count != unit_count:
                 add(
                     "faiss_mapping_count_mismatch",
                     "error",
                     "SQLite and FAISS mapping counts differ",
                     sqlite=unit_count,
-                    mapping=len(mapping_ids),
+                    mapping=mapping_count,
                 )
-            elif sqlite_unit_ids is not None and set(mapping_ids) != sqlite_unit_ids:
+            if bool(inspection.get("ids_mismatch")):
                 add("faiss_mapping_ids_mismatch", "error", "SQLite and FAISS mapping IDs differ")
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            mapping_ids = None
-            add(
-                "faiss_mapping_invalid",
-                "error",
-                "FAISS ID mapping could not be parsed",
-                error=type(exc).__name__,
-            )
 
     if not metadata_valid:
         return report()
@@ -207,15 +309,16 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
     if faiss is not None and index_path.is_file():
         try:
             index = faiss.read_index(str(index_path))
-            ntotal = int(index.ntotal)
+            ntotal = _strict_index_integer(index.ntotal)
+            index_dim = _strict_index_integer(index.d, positive=True)
             add("faiss_index", "ok", "FAISS index is readable", count=ntotal)
-            if mapping_ids is not None and ntotal != len(mapping_ids):
+            if mapping_count is not None and ntotal != mapping_count:
                 add(
                     "faiss_index_count_mismatch",
                     "error",
                     "FAISS index and ID mapping counts differ",
                     index=ntotal,
-                    mapping=len(mapping_ids),
+                    mapping=mapping_count,
                 )
             if unit_count is not None and ntotal != unit_count:
                 add(
@@ -224,6 +327,14 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
                     "FAISS index and SQLite retrieval-unit counts differ",
                     index=ntotal,
                     sqlite=unit_count,
+                )
+            if index_dim != vector_dim:
+                add(
+                    "faiss_index_dimension_mismatch",
+                    "error",
+                    "FAISS index and vector metadata dimensions differ",
+                    index=index_dim,
+                    metadata=vector_dim,
                 )
         except Exception as exc:
             add("faiss_index_invalid", "error", "FAISS index could not be read", error=type(exc).__name__)

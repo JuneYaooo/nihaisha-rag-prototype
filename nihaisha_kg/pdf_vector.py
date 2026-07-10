@@ -9,10 +9,12 @@ import os
 import re
 import sqlite3
 import struct
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from numbers import Integral
 from pathlib import Path
 from typing import Iterable
 
@@ -1274,10 +1276,67 @@ def read_faiss_unit_ids(ids_path: Path) -> list[str]:
     return unit_ids
 
 
-_FAISS_BUNDLE_CACHE: OrderedDict[
-    tuple[str, str, int, int], tuple[object, list[str]]
-] = OrderedDict()
-_FAISS_BUNDLE_CACHE_LIMIT = 8
+FileFingerprint = tuple[str, int, int, int, int, int]
+
+
+class _ObjectIdentity:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def __hash__(self) -> int:
+        return id(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ObjectIdentity) and self.value is other.value
+
+
+FaissBundleCacheKey = tuple[FileFingerprint, FileFingerprint, _ObjectIdentity]
+_FAISS_BUNDLE_CACHE: OrderedDict[FaissBundleCacheKey, tuple[object, list[str]]] = OrderedDict()
+_FAISS_BUNDLE_CACHE_LIMIT = 1
+_FAISS_BUNDLE_CACHE_LOCK = threading.RLock()
+_FAISS_VALIDATION_CACHE: OrderedDict[tuple[object, ...], bool] = OrderedDict()
+_FAISS_VALIDATION_CACHE_LIMIT = 16
+_FAISS_VALIDATION_CACHE_LOCK = threading.RLock()
+
+
+def _file_fingerprint(path: Path) -> FileFingerprint:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return (
+        str(resolved),
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _faiss_bundle_cache_key(
+    index_path: Path,
+    ids_path: Path,
+    faiss_module: object,
+) -> FaissBundleCacheKey:
+    return (
+        _file_fingerprint(index_path),
+        _file_fingerprint(ids_path),
+        _ObjectIdentity(faiss_module),
+    )
+
+
+def _optional_file_fingerprint(path: Path) -> FileFingerprint | None:
+    try:
+        fingerprint = _file_fingerprint(path)
+        return fingerprint if fingerprint[3] > 0 else None
+    except FileNotFoundError:
+        return None
+
+
+def _database_revision_fingerprint(db_path: Path) -> tuple[object, ...]:
+    return (
+        _file_fingerprint(db_path),
+        _optional_file_fingerprint(Path(f"{db_path}-wal")),
+    )
 
 
 def load_faiss_bundle(
@@ -1286,27 +1345,84 @@ def load_faiss_bundle(
     faiss_module: object,
 ) -> tuple[object, list[str]]:
     """Load a FAISS index and ID mapping, caching unchanged on-disk bundles."""
-    resolved_index = index_path.resolve()
-    resolved_ids = ids_path.resolve()
-    key = (
-        str(resolved_index),
-        str(resolved_ids),
-        resolved_index.stat().st_mtime_ns,
-        resolved_ids.stat().st_mtime_ns,
-    )
-    cached = _FAISS_BUNDLE_CACHE.get(key)
-    if cached is not None:
-        _FAISS_BUNDLE_CACHE.move_to_end(key)
-        return cached
-    bundle = (
-        faiss_module.read_index(str(index_path)),
-        read_faiss_unit_ids(ids_path),
-    )
-    _FAISS_BUNDLE_CACHE[key] = bundle
-    _FAISS_BUNDLE_CACHE.move_to_end(key)
-    while len(_FAISS_BUNDLE_CACHE) > _FAISS_BUNDLE_CACHE_LIMIT:
-        _FAISS_BUNDLE_CACHE.popitem(last=False)
-    return bundle
+    with _FAISS_BUNDLE_CACHE_LOCK:
+        for _ in range(3):
+            key = _faiss_bundle_cache_key(index_path, ids_path, faiss_module)
+            cached = _FAISS_BUNDLE_CACHE.get(key)
+            if cached is not None:
+                _FAISS_BUNDLE_CACHE.move_to_end(key)
+                return cached
+            bundle = (
+                faiss_module.read_index(str(index_path)),
+                read_faiss_unit_ids(ids_path),
+            )
+            if key != _faiss_bundle_cache_key(index_path, ids_path, faiss_module):
+                continue
+            _FAISS_BUNDLE_CACHE[key] = bundle
+            _FAISS_BUNDLE_CACHE.move_to_end(key)
+            while len(_FAISS_BUNDLE_CACHE) > _FAISS_BUNDLE_CACHE_LIMIT:
+                _FAISS_BUNDLE_CACHE.popitem(last=False)
+            return bundle
+    raise RuntimeError("FAISS artifacts changed while loading")
+
+
+def _strict_nonnegative_integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+        raise ValueError("expected a nonnegative integer")
+    return int(value)
+
+
+def _audit_faiss_bundle_ids(
+    conn: sqlite3.Connection,
+    index: object,
+    unit_ids: list[str],
+) -> bool:
+    if not unit_ids or len(unit_ids) != len(set(unit_ids)):
+        return False
+    try:
+        if _strict_nonnegative_integer(index.ntotal) != len(unit_ids):
+            return False
+        sqlite_unit_ids = {
+            str(row[0]) for row in conn.execute("SELECT unit_id FROM retrieval_units").fetchall()
+        }
+    except Exception:
+        return False
+    return len(sqlite_unit_ids) == len(unit_ids) and sqlite_unit_ids == set(unit_ids)
+
+
+def _faiss_bundle_is_valid(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    index_path: Path,
+    ids_path: Path,
+    faiss_module: object,
+    index: object,
+    unit_ids: list[str],
+) -> bool:
+    try:
+        unit_count = int(conn.execute("SELECT COUNT(*) FROM retrieval_units").fetchone()[0])
+        key = (
+            _faiss_bundle_cache_key(index_path, ids_path, faiss_module),
+            _database_revision_fingerprint(db_path),
+            unit_count,
+            id(index),
+            id(unit_ids),
+        )
+    except Exception:
+        return False
+    with _FAISS_VALIDATION_CACHE_LOCK:
+        cached = _FAISS_VALIDATION_CACHE.get(key)
+        if cached is not None:
+            _FAISS_VALIDATION_CACHE.move_to_end(key)
+            return cached
+        valid = unit_count == len(unit_ids) and _audit_faiss_bundle_ids(conn, index, unit_ids)
+        if key[1] != _database_revision_fingerprint(db_path):
+            return False
+        _FAISS_VALIDATION_CACHE[key] = valid
+        _FAISS_VALIDATION_CACHE.move_to_end(key)
+        while len(_FAISS_VALIDATION_CACHE) > _FAISS_VALIDATION_CACHE_LIMIT:
+            _FAISS_VALIDATION_CACHE.popitem(last=False)
+        return valid
 
 
 def build_faiss_vector_index(
@@ -2249,22 +2365,15 @@ class LocalVectorStore:
             index, unit_ids = load_faiss_bundle(index_path, ids_path, faiss)
         except Exception:  # malformed artifacts and third-party loader failures fall back safely
             return None
-        if not unit_ids:
-            return None
-        if len(unit_ids) != len(set(unit_ids)):
-            return None
-        try:
-            ntotal = index.ntotal
-            if isinstance(ntotal, bool):
-                return None
-            if int(ntotal) < 0 or int(ntotal) != len(unit_ids):
-                return None
-            sqlite_unit_ids = [
-                str(row[0]) for row in conn.execute("SELECT unit_id FROM retrieval_units").fetchall()
-            ]
-        except Exception:
-            return None
-        if len(sqlite_unit_ids) != len(unit_ids) or set(sqlite_unit_ids) != set(unit_ids):
+        if not _faiss_bundle_is_valid(
+            conn,
+            self.db_path,
+            index_path,
+            ids_path,
+            faiss,
+            index,
+            unit_ids,
+        ):
             return None
         top_k = min(len(unit_ids), max(unit_limit, limit * 20))
         try:
@@ -2272,12 +2381,27 @@ class LocalVectorStore:
         except Exception:  # unusable FAISS indexes must not bypass the scan guard
             return None
         scored_unit_ids: list[tuple[float, str]] = []
-        for score, row_index in zip(scores[0], indices[0]):
-            row_index = int(row_index)
-            score = float(score)
-            if row_index < 0 or row_index >= len(unit_ids) or score <= 0:
-                continue
-            scored_unit_ids.append((score, unit_ids[row_index]))
+        seen_row_indices: set[int] = set()
+        try:
+            returned_hits = zip(scores[0], indices[0])
+            for score_value, row_index_value in returned_hits:
+                try:
+                    row_index = int(row_index_value)
+                    score = float(score_value)
+                except (OverflowError, TypeError, ValueError):
+                    continue
+                if (
+                    row_index < 0
+                    or row_index >= len(unit_ids)
+                    or row_index in seen_row_indices
+                    or not math.isfinite(score)
+                    or score <= 0
+                ):
+                    continue
+                seen_row_indices.add(row_index)
+                scored_unit_ids.append((score, unit_ids[row_index]))
+        except (IndexError, TypeError):
+            return None
         if not scored_unit_ids:
             return []
 
