@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 import time
@@ -42,12 +43,24 @@ def _trace_text(value: object, max_chars: int = 500) -> str:
 def _dict_get(mapping: dict[str, object], key: str, default: object = None) -> object:
     try:
         return dict.get(mapping, key, default)
-    except (MemoryError, RecursionError, TypeError, ValueError):
+    except Exception:
         return default
 
 
 def _json_fallback(value: object) -> str:
     return f"<{type(value).__name__}>"[:80]
+
+
+def _bounded_latency_ms(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(parsed):
+        return 0.0
+    return round(max(0.0, min(parsed, 3_600_000.0)), 3)
 
 
 def _search_trace(
@@ -94,7 +107,7 @@ def _search_trace(
             max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
         ) or "none",
         "degraded_features": [degraded] if degraded else [],
-        "latency_ms": {"search": max(0.0, round(float(latency_ms), 3))},
+        "latency_ms": {"search": _bounded_latency_ms(latency_ms)},
     }
 
 
@@ -102,6 +115,14 @@ def _print_cli_error(command: str, error: BaseException) -> int:
     message = sanitize_rerank_error(error, max_chars=240)
     print(f"{command} failed: {message or type(error).__name__}", file=sys.stderr)
     return 1
+
+
+def _positive_limit(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("limit must be a positive integer")
+    if value <= 0:
+        raise ValueError("limit must be a positive integer")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -225,6 +246,12 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--trace", action="store_true")
 
     args = parser.parse_args(argv)
+
+    if args.command in {"search", "evaluate", "answer"}:
+        try:
+            args.limit = _positive_limit(args.limit)
+        except (TypeError, ValueError) as exc:
+            return _print_cli_error(args.command, exc)
 
     if args.command == "stats":
         store = LocalVectorStore(args.db)
@@ -367,23 +394,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(str(item["text"])[:500])
             print()
-        if args.trace:
-            print(
-                json.dumps(
-                    _search_trace(
-                        args.query,
-                        results,
-                        reranker_model=(rerank_outcome.model if rerank_outcome else "none"),
-                        degraded_feature=(
-                            rerank_outcome.degraded_feature if rerank_outcome else ""
-                        ),
-                        latency_ms=elapsed_ms,
-                    ),
-                    ensure_ascii=False,
-                    indent=2,
-                    default=_json_fallback,
-                )
-            )
         return 0
 
     if args.command == "answer":

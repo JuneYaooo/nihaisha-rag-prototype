@@ -713,7 +713,8 @@ class PdfVectorTests(unittest.TestCase):
 
         def fake_doctor(db_path: Path, faiss_loader: object) -> dict[str, object]:
             calls.append((db_path, faiss_loader))
-            return {"status": "ok" if len(calls) == 1 else "error", "checks": []}
+            statuses = ["ok", "error", "warning"]
+            return {"status": statuses[len(calls) - 1], "checks": []}
 
         stdout = io.StringIO()
         with (
@@ -723,8 +724,9 @@ class PdfVectorTests(unittest.TestCase):
         ):
             ok_status = rag_cli.main(["doctor", "--db", "/tmp/ok.sqlite"])
             error_status = rag_cli.main(["doctor", "--db", "/tmp/bad.sqlite"])
+            warning_status = rag_cli.main(["doctor", "--db", "/tmp/warn.sqlite"])
 
-        self.assertEqual((ok_status, error_status), (0, 1))
+        self.assertEqual((ok_status, error_status, warning_status), (0, 1, 1))
         self.assertEqual(calls[0], (Path("/tmp/ok.sqlite"), loader))
         self.assertIn('"status": "ok"', stdout.getvalue())
 
@@ -755,6 +757,38 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(store_instances, [(Path("/tmp/rag.sqlite"), {})])
         evaluate.assert_called_once_with(unittest.mock.ANY, [case], mode="text", limit=10)
         self.assertIn('"hit_at_1": 1.0', stdout.getvalue())
+
+    def test_cli_invalid_limits_fail_before_dispatch_dependencies(self) -> None:
+        commands = [
+            ["search", "q", "--mode", "text", "--limit", "0"],
+            ["search", "q", "--mode", "text", "--limit", "-2", "--reranker", "auto"],
+            ["evaluate", "--mode", "hybrid", "--limit", "0"],
+            ["answer", "q", "--mode", "text", "--limit", "0"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                stderr = io.StringIO()
+                with (
+                    patch("nihaisha_kg.cli.load_eval_cases") as load_cases,
+                    patch("nihaisha_kg.cli.LocalVectorStore") as store,
+                    patch("nihaisha_kg.cli.create_embedding_backend_for_db") as backend,
+                    patch("nihaisha_kg.cli.siliconflow_api_key_available") as key_check,
+                    patch("nihaisha_kg.cli.answer_pdf_rag") as answer,
+                    patch("sys.stderr", stderr),
+                ):
+                    status = rag_cli.main(command)
+                self.assertEqual(status, 1)
+                self.assertIn("limit must be a positive integer", stderr.getvalue())
+                load_cases.assert_not_called()
+                store.assert_not_called()
+                backend.assert_not_called()
+                key_check.assert_not_called()
+                answer.assert_not_called()
+
+        for invalid in (True, 0, -1, 1.5, "2"):
+            with self.subTest(helper_value=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    rag_cli._positive_limit(invalid)  # type: ignore[arg-type]
 
     def test_cli_search_retrieves_and_reranks_once_then_limits_output(self) -> None:
         candidates = [
@@ -877,6 +911,82 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(payload["trace"]["channel_ranks"], [{"paragraph_id": "p1", "text": 2, "vector": 3}])
         self.assertNotIn(secret, serialized_trace)
         self.assertNotIn("provider", serialized_trace)
+
+    def test_cli_plain_search_trace_flag_does_not_append_trace_output(self) -> None:
+        result = {
+            "paragraph_id": "p1",
+            "score": 1.0,
+            "retrieval_sources": ["text"],
+            "source_path": "/tmp/doc.pdf",
+            "page_start": 1,
+            "text": "evidence",
+        }
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return [result]
+
+        outputs: list[str] = []
+        with patch("nihaisha_kg.cli.LocalVectorStore", FakeStore):
+            for extra in ([], ["--trace"]):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    status = rag_cli.main(
+                        ["search", "query", "--mode", "text", "--reranker", "none", *extra]
+                    )
+                self.assertEqual(status, 0)
+                outputs.append(stdout.getvalue())
+
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertNotIn("normalized_query", outputs[1])
+
+    def test_search_trace_tolerates_hostile_mapping_subclasses(self) -> None:
+        secret = "sk-hostile-container-123456"
+
+        class HostileDict(dict[str, object]):
+            def get(self, *_args: object, **_kwargs: object) -> object:
+                raise RuntimeError(secret)
+
+            def __iter__(self):  # type: ignore[no-untyped-def]
+                raise KeyError(secret)
+
+            def values(self):  # type: ignore[no-untyped-def]
+                raise RecursionError(secret)
+
+        row = HostileDict(
+            paragraph_id="p1",
+            retrieval_sources=["text"],
+            channel_ranks=HostileDict(text=1),
+        )
+
+        trace = rag_cli._search_trace(
+            "query",
+            [row],
+            reranker_model="none",
+            latency_ms=float("inf"),
+        )
+        answer_plan_trace = pdf_vector._trace_query_plan(
+            ["query"],
+            [
+                HostileDict(
+                    paragraph_id="p1",
+                    retrieval_sources=["text"],
+                    channel_ranks=HostileDict(text=1),
+                    rewrite_observations=[HostileDict(rewrite_index=1, rank=1)],
+                )
+            ],
+        )
+
+        serialized = json.dumps(trace, ensure_ascii=False, allow_nan=False)
+        self.assertEqual(trace["selected_paragraph_ids"], ["p1"])
+        self.assertEqual(trace["channel_ranks"], [{"paragraph_id": "p1", "text": 1}])
+        self.assertNotIn(secret, serialized)
+        self.assertEqual(trace["latency_ms"], {"search": 0.0})
+        self.assertEqual(answer_plan_trace[0]["observations"][0]["paragraph_id"], "p1")
+        self.assertNotIn(secret, json.dumps(answer_plan_trace, ensure_ascii=False))
 
     def test_cli_answer_forwards_reranker_model_and_trace_once(self) -> None:
         calls: list[dict[str, object]] = []
@@ -1995,6 +2105,60 @@ class PdfVectorTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "trace_enabled"):
                 answer_pdf_rag("question", Path("/unused.sqlite"), mode="text", trace_enabled=1)  # type: ignore[arg-type]
         store.assert_not_called()
+
+    def test_answer_trace_latency_has_exact_phases_and_covers_all_work(self) -> None:
+        initial = [{"paragraph_id": "p1", "rewrite_observations": []}]
+        followup = [{"paragraph_id": "p2", "rewrite_observations": []}]
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return []
+
+        synthesized = {
+            "answer": "answer",
+            "citations": [],
+            "related_knowledge_units": [],
+            "results": initial + followup,
+        }
+        clock = [index / 1000.0 for index in range(40)]
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.time.perf_counter", side_effect=clock) as timer,
+            patch("nihaisha_kg.pdf_vector.detect_answer_intent", return_value="general"),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", side_effect=[["initial"], ["initial", "followup"]]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", side_effect=[initial, followup]),
+            patch("nihaisha_kg.pdf_vector.fuse_query_rewrites", return_value=initial + followup),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", side_effect=lambda _q, _i, rows: rows),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesized),
+        ):
+            answer = answer_pdf_rag(
+                "query",
+                Path("/unused.sqlite"),
+                mode="text",
+                reranker="none",
+                trace_enabled=True,
+            )
+
+        latency = answer["trace"]["latency_ms"]
+        self.assertEqual(set(latency), {"planning", "retrieval", "rerank", "guide", "synthesis"})
+        self.assertEqual(
+            latency,
+            {
+                "planning": 2.0,
+                "retrieval": 4.0,
+                "rerank": 1.0,
+                "guide": 1.0,
+                "synthesis": 2.0,
+            },
+        )
+        self.assertEqual(timer.call_count, 20)
+        self.assertTrue(all(0.0 <= value <= 60_000.0 for value in latency.values()))
+        self.assertEqual(pdf_vector._bounded_latency_ms(float("inf")), 0.0)
+        self.assertEqual(pdf_vector._bounded_latency_ms(10_000_000.0), 3_600_000.0)
 
     def test_answer_pdf_rag_explicit_siliconflow_uses_model_and_auto_without_key_skips(self) -> None:
         candidate = {"paragraph_id": "p1", "text": "证据"}
