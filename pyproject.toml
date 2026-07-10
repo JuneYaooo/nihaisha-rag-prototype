@@ -12,6 +12,9 @@ dependencies = [
 faiss = [
   "faiss-cpu>=1.8.0",
 ]
+runtime = [
+  "faiss-cpu>=1.8.0",
+]
 local = [
   "FlagEmbedding>=1.3.0",
 ]

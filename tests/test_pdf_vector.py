@@ -45,6 +45,7 @@ from nihaisha_kg.pdf_vector import (
     sparse_dot,
     unpack_dense_vector,
     unpack_sparse_vector,
+    load_faiss_bundle,
 )
 
 
@@ -77,6 +78,7 @@ class FakeFaissIndex:
 class FakeFaiss:
     def __init__(self) -> None:
         self.indexes: dict[str, FakeFaissIndex] = {}
+        self.read_count = 0
 
     def IndexFlatIP(self, dims: int) -> FakeFaissIndex:
         return FakeFaissIndex(dims)
@@ -86,6 +88,7 @@ class FakeFaiss:
         Path(path).write_text("fake-faiss-index", encoding="utf-8")
 
     def read_index(self, path: str) -> FakeFaissIndex:
+        self.read_count += 1
         return self.indexes[path]
 
 
@@ -1989,6 +1992,102 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["paragraph_id"], "p-a")
         self.assertIn("faiss", results[0]["retrieval_sources"])
         self.assertGreater(results[0]["vector_score"], 0)
+
+    def test_faiss_bundle_is_cached_until_either_file_changes(self) -> None:
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text('{"unit_id": "u1"}\n', encoding="utf-8")
+            fake_faiss.indexes[str(index_path)] = FakeFaissIndex(2)
+
+            first = load_faiss_bundle(index_path, ids_path, fake_faiss)
+            second = load_faiss_bundle(index_path, ids_path, fake_faiss)
+            old_mtime = ids_path.stat().st_mtime_ns
+            ids_path.write_text('{"unit_id": "u1"}\n\n', encoding="utf-8")
+            os.utime(ids_path, ns=(old_mtime + 1_000_000, old_mtime + 1_000_000))
+            third = load_faiss_bundle(index_path, ids_path, fake_faiss)
+
+        self.assertIs(first, second)
+        self.assertIsNot(second, third)
+        self.assertEqual(fake_faiss.read_count, 2)
+
+    def test_dense_search_refuses_large_brute_force_scan_without_faiss(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a",
+            doc_id="doc",
+            source_path="/tmp/doc.pdf",
+            title="test",
+            page_start=1,
+            page_end=1,
+            text="桂枝汤。麻黄汤。葛根汤。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        units = [
+            RetrievalUnit(
+                unit_id=f"u-{index}", paragraph_id="p-a", doc_id="doc",
+                unit_type="sentence", text=f"unit {index}", text_for_embedding=f"unit {index}",
+                sentence_start=index, sentence_end=index, weight=1.0,
+            )
+            for index in range(3)
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(
+                Path(tmpdir) / "rag.sqlite",
+                embedding_backend=ToyDenseBackend(),
+                brute_force_limit=2,
+            )
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(units)
+
+            with self.assertRaisesRegex(RuntimeError, "FAISS.*nihaisha-rag doctor"):
+                store.search_vector("桂枝汤", faiss_module=False)
+
+    def test_small_dense_search_can_brute_force_without_faiss(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        unit = RetrievalUnit(
+            unit_id="u-1", paragraph_id="p-a", doc_id="doc", unit_type="sentence",
+            text="桂枝汤主之", text_for_embedding="桂枝汤主之", sentence_start=0,
+            sentence_end=0, weight=1.0,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(
+                Path(tmpdir) / "rag.sqlite",
+                embedding_backend=ToyDenseBackend(),
+                brute_force_limit=1,
+            )
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units([unit])
+
+            results = store.search_vector("桂枝汤", faiss_module=False)
+
+        self.assertEqual(results[0]["paragraph_id"], "p-a")
+
+    def test_brute_force_limit_rejects_bool_and_negative_values(self) -> None:
+        with self.assertRaises(ValueError):
+            LocalVectorStore(Path("x.sqlite"), brute_force_limit=-1)
+        with self.assertRaises(TypeError):
+            LocalVectorStore(Path("x.sqlite"), brute_force_limit=True)
 
     def test_vector_search_rejects_embedding_kind_mismatch(self) -> None:
         paragraph = ParsedParagraph(

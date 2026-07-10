@@ -10,6 +10,7 @@ import re
 import sqlite3
 import struct
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1270,6 +1271,41 @@ def read_faiss_unit_ids(ids_path: Path) -> list[str]:
     return unit_ids
 
 
+_FAISS_BUNDLE_CACHE: OrderedDict[
+    tuple[str, str, int, int], tuple[object, list[str]]
+] = OrderedDict()
+_FAISS_BUNDLE_CACHE_LIMIT = 8
+
+
+def load_faiss_bundle(
+    index_path: Path,
+    ids_path: Path,
+    faiss_module: object,
+) -> tuple[object, list[str]]:
+    """Load a FAISS index and ID mapping, caching unchanged on-disk bundles."""
+    resolved_index = index_path.resolve()
+    resolved_ids = ids_path.resolve()
+    key = (
+        str(resolved_index),
+        str(resolved_ids),
+        resolved_index.stat().st_mtime_ns,
+        resolved_ids.stat().st_mtime_ns,
+    )
+    cached = _FAISS_BUNDLE_CACHE.get(key)
+    if cached is not None:
+        _FAISS_BUNDLE_CACHE.move_to_end(key)
+        return cached
+    bundle = (
+        faiss_module.read_index(str(index_path)),
+        read_faiss_unit_ids(ids_path),
+    )
+    _FAISS_BUNDLE_CACHE[key] = bundle
+    _FAISS_BUNDLE_CACHE.move_to_end(key)
+    while len(_FAISS_BUNDLE_CACHE) > _FAISS_BUNDLE_CACHE_LIMIT:
+        _FAISS_BUNDLE_CACHE.popitem(last=False)
+    return bundle
+
+
 def build_faiss_vector_index(
     db_path: Path,
     index_path: Path | None = None,
@@ -1360,10 +1396,16 @@ class LocalVectorStore:
         db_path: Path,
         dims: int = 2048,
         embedding_backend: SparseHashEmbeddingBackend | DenseEmbeddingBackend | None = None,
+        brute_force_limit: int = 10_000,
     ) -> None:
+        if isinstance(brute_force_limit, bool) or not isinstance(brute_force_limit, int):
+            raise TypeError("brute_force_limit must be a nonnegative integer")
+        if brute_force_limit < 0:
+            raise ValueError("brute_force_limit must be a nonnegative integer")
         self.db_path = db_path
         self.dims = dims
         self.embedding_backend = embedding_backend or SparseHashEmbeddingBackend(dims=dims)
+        self.brute_force_limit = brute_force_limit
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2157,6 +2199,14 @@ class LocalVectorStore:
                 if faiss_results is not None:
                     return faiss_results
 
+                unit_count = int(conn.execute("SELECT COUNT(*) FROM retrieval_units").fetchone()[0])
+                if unit_count > self.brute_force_limit:
+                    raise RuntimeError(
+                        f"Dense search has {unit_count} retrieval units and cannot safely brute-force "
+                        f"more than {self.brute_force_limit}. Install FAISS with "
+                        "`pip install \".[runtime]\"` and run `nihaisha-rag doctor`."
+                    )
+
             rows = conn.execute(
                 """
                 SELECT unit_id, paragraph_id, unit_type, text, sentence_start, sentence_end, weight, vector_blob
@@ -2187,15 +2237,22 @@ class LocalVectorStore:
         ids_path = default_faiss_ids_path(self.db_path)
         if not index_path.exists() or not ids_path.exists():
             return None
-        faiss = faiss_module or load_faiss_module()
+        faiss = load_faiss_module() if faiss_module is None else faiss_module
         if faiss is None:
             return None
-        unit_ids = read_faiss_unit_ids(ids_path)
+        if faiss is False:
+            return None
+        try:
+            index, unit_ids = load_faiss_bundle(index_path, ids_path, faiss)
+        except Exception:  # malformed artifacts and third-party loader failures fall back safely
+            return None
         if not unit_ids:
             return None
-        index = faiss.read_index(str(index_path))
         top_k = min(len(unit_ids), max(unit_limit, limit * 20))
-        scores, indices = index.search(faiss_matrix([query_vector]), top_k)
+        try:
+            scores, indices = index.search(faiss_matrix([query_vector]), top_k)
+        except Exception:  # unusable FAISS indexes must not bypass the scan guard
+            return None
         scored_unit_ids: list[tuple[float, str]] = []
         for score, row_index in zip(scores[0], indices[0]):
             row_index = int(row_index)
