@@ -172,7 +172,7 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
             tables = {
                 name.casefold()
                 for name, object_type in schema_objects
-                if object_type in {"table", "view"}
+                if object_type == "table"
             }
             missing_tables = [name for name in REQUIRED_TABLES if name.casefold() not in tables]
             if missing_tables:

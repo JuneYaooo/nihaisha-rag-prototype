@@ -442,6 +442,33 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
 
+    def test_doctor_rejects_required_name_views_and_reports_only_non_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE PARAGRAPHS(paragraph_id TEXT);
+                    CREATE VIEW RETRIEVAL_UNITS AS SELECT paragraph_id AS unit_id FROM PARAGRAPHS;
+                    CREATE VIRTUAL TABLE PARAGRAPHS_FTS USING fts5(paragraph_id);
+                    CREATE VIEW KNOWLEDGE_UNITS AS
+                        SELECT paragraph_id AS knowledge_unit_id FROM PARAGRAPHS;
+                    CREATE TABLE META(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO META VALUES ('vector_kind', 'sparse');
+                    INSERT INTO META VALUES ('embedding', 'sparse_hash');
+                    INSERT INTO META VALUES ('vector_dim', '2048');
+                    """
+                )
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        diagnoses = {item["code"]: item for item in report["diagnoses"]}
+        self.assertEqual(report["status"], "error")
+        self.assertEqual(
+            diagnoses["schema_missing_tables"]["details"]["tables"],
+            ["retrieval_units", "knowledge_units"],
+        )
+
     def test_doctor_reports_faiss_dimension_mismatch(self) -> None:
         class Index:
             ntotal = 1
