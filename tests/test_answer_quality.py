@@ -214,7 +214,12 @@ class AnswerQualityTests(unittest.TestCase):
             store.recreate()
             store.insert_paragraphs([paragraph])
             store.rebuild_text_index()
-            answer = pdf_vector.answer_pdf_rag("桂枝汤出处在哪一页？", db_path, mode="text")
+            answer = pdf_vector.answer_pdf_rag(
+                "桂枝汤出处在哪一页？",
+                db_path,
+                mode="text",
+                reranker="none",
+            )
 
         self.assertEqual(answer["intent"], "source_lookup")
         self.assertIn("伤寒论.pdf p68", answer["answer"])

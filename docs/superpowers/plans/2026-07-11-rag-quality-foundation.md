@@ -804,9 +804,11 @@ git commit -m "fix: fuse retrieval channels by reciprocal rank"
 - Create: `nihaisha_kg/rerank.py`
 - Create: `tests/test_rerank.py`
 - Modify: `nihaisha_kg/pdf_vector.py:3570-3637`
+- Modify: `tests/test_pdf_vector.py`
+- Modify: `tests/test_answer_quality.py`
 - Modify: `.env.example`
 
-- [ ] **Step 1: Write failing reranker request and fallback tests**
+- [x] **Step 1: Write failing reranker request and fallback tests**
 
 Create `tests/test_rerank.py` with a fake response/session:
 
@@ -883,7 +885,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run tests and verify the module is missing**
+- [x] **Step 2: Run tests and verify the module is missing**
 
 Run:
 
@@ -893,7 +895,7 @@ python3 -m unittest tests.test_rerank -v
 
 Expected: `ERROR` with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement the provider adapter**
+- [x] **Step 3: Implement the provider adapter**
 
 Create `nihaisha_kg/rerank.py`:
 
@@ -991,38 +993,42 @@ class SiliconFlowReranker:
         )
 ```
 
-- [ ] **Step 4: Rerank once after all query rewrites**
+- [x] **Step 4: Rerank once after all query rewrites**
 
-Add `reranker_backend: object | None = None`, `reranker: str = "auto"`, and `rerank_model: str | None = None` to `answer_pdf_rag`. After rewrite fusion and intent filtering, but before `select_diverse_results`, add:
+Add `reranker_backend: object | None = None`, `reranker: str = "none"`, and `rerank_model: str | None = None` to `answer_pdf_rag`. The library default is deliberately network-free; Task 7 gives the user-facing CLI its `auto` default. Validate `reranker` as one of `auto`, `none`, or `siliconflow`. After rewrite fusion and intent filtering, but before `select_diverse_results`, add:
 
 ```python
     rerank_outcome = None
     if reranker_backend is not None:
-        rerank_outcome = reranker_backend.rerank(query, intent_results, limit=max(limit * 3, 12))
+        rerank_outcome = reranker_backend.rerank(
+            query,
+            intent_results,
+            limit=min(len(intent_results), max(limit * 3, 12)),
+        )
     elif reranker == "siliconflow" or (reranker == "auto" and siliconflow_api_key_available()):
         from .rerank import SiliconFlowReranker
 
         rerank_outcome = SiliconFlowReranker(model=rerank_model).rerank(
             query,
             intent_results,
-            limit=max(limit * 3, 12),
+            limit=min(len(intent_results), max(limit * 3, 12)),
         )
     if rerank_outcome is not None:
         intent_results = rerank_outcome.results
 ```
 
-Store model/degradation details in the trace added in Task 7. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one.
+Attach only bounded, serializable rerank metadata to the answer as `{"model": ..., "degraded_feature": ..., "error": ...}`; never attach candidate documents or credentials. Task 7 can consume this metadata in its trace. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one. Existing direct answer tests pass `reranker="none"`, and orchestration tests inject a fake backend so tests never reach the network.
 
-- [ ] **Step 5: Document environment settings**
+- [x] **Step 5: Document environment settings**
 
 Append to `.env.example`:
 
 ```dotenv
-# Optional answer-stage reranker. `auto` uses it when SILICONFLOW_API_KEY is present.
+# Optional answer-stage reranker. Library callers opt in; the CLI may select it in auto mode.
 SILICONFLOW_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 ```
 
-- [ ] **Step 6: Run rerank and answer tests**
+- [x] **Step 6: Run rerank and answer tests**
 
 Run:
 
@@ -1032,7 +1038,7 @@ python3 -m unittest tests.test_rerank tests.test_answer_quality -v
 
 Expected: all tests pass and the fake session receives one request.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add nihaisha_kg/rerank.py nihaisha_kg/pdf_vector.py tests/test_rerank.py .env.example

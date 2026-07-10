@@ -3796,7 +3796,12 @@ def answer_pdf_rag(
     model: str = "BAAI/bge-m3",
     batch_size: int = 32,
     embedding_backend: SparseHashEmbeddingBackend | DenseEmbeddingBackend | None = None,
+    reranker_backend: object | None = None,
+    reranker: str = "none",
+    rerank_model: str | None = None,
 ) -> dict[str, object]:
+    if reranker not in {"auto", "none", "siliconflow"}:
+        raise ValueError(f"unsupported reranker: {reranker}")
     db_path = db_path.expanduser().resolve()
     if embedding_backend is not None:
         store = LocalVectorStore(db_path, embedding_backend=embedding_backend)
@@ -3835,8 +3840,33 @@ def answer_pdf_rag(
         )
         results = fuse_query_rewrites([results, followup_results], limit=max(candidate_limit * 2, 32))
     intent_results = filter_results_for_intent(query, intent, results)
+    rerank_outcome = None
+    rerank_limit = min(len(intent_results), max(limit * 3, 12))
+    if reranker_backend is not None:
+        rerank_outcome = reranker_backend.rerank(query, intent_results, limit=rerank_limit)
+    elif reranker == "siliconflow" or (
+        reranker == "auto" and siliconflow_api_key_available()
+    ):
+        from .rerank import SiliconFlowReranker
+
+        rerank_outcome = SiliconFlowReranker(model=rerank_model).rerank(
+            query,
+            intent_results,
+            limit=rerank_limit,
+        )
+    if rerank_outcome is not None:
+        intent_results = rerank_outcome.results
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
+    answer["rerank"] = (
+        {
+            "model": rerank_outcome.model,
+            "degraded_feature": rerank_outcome.degraded_feature,
+            "error": rerank_outcome.error,
+        }
+        if rerank_outcome is not None
+        else {"model": "none", "degraded_feature": "", "error": ""}
+    )
     guide_query_parts = [
         query,
         str(answer.get("answer", "")),

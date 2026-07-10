@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from nihaisha_kg import cli as rag_cli
+from nihaisha_kg.rerank import RerankOutcome
 from nihaisha_kg.pdf_vector import (
     DenseEmbeddingBackend,
     LocalBgeM3EmbeddingBackend,
@@ -1149,6 +1150,7 @@ class PdfVectorTests(unittest.TestCase):
                 db_path=db_path,
                 mode="text",
                 limit=3,
+                reranker="none",
             )
 
         citation_text = "\n".join(str(citation["evidence_quote"]) for citation in answer["citations"])
@@ -1162,6 +1164,250 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(
             {"p-seed", "p-conversion", "p-ratio"},
             {str(citation["paragraph_id"]) for citation in answer["citations"]},
+        )
+
+    def test_answer_pdf_rag_reranks_once_after_rewrite_fusion_and_intent_filtering(self) -> None:
+        initial = [{"paragraph_id": "initial", "title": "初检", "text": "初检证据"}]
+        followup = [{"paragraph_id": "followup", "title": "追检", "text": "追检证据"}]
+        filtered = [
+            {"paragraph_id": "initial", "title": "初检", "text": "初检证据"},
+            {"paragraph_id": "followup", "title": "追检", "text": "追检证据"},
+        ]
+        reranked = [dict(filtered[1], rerank_score=0.9), dict(filtered[0], rerank_score=0.4)]
+        events: list[str] = []
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, _query: str, limit: int = 8) -> list[dict[str, object]]:
+                return []
+
+        class FakeReranker:
+            calls: list[tuple[str, list[dict[str, object]], int]] = []
+
+            def rerank(
+                self,
+                query: str,
+                candidates: list[dict[str, object]],
+                limit: int,
+            ) -> RerankOutcome:
+                events.append("rerank")
+                self.calls.append((query, candidates, limit))
+                return RerankOutcome(results=reranked, model="fake-reranker")
+
+        backend = FakeReranker()
+
+        def fake_filter(
+            _query: str,
+            _intent: str,
+            candidates: list[dict[str, object]],
+        ) -> list[dict[str, object]]:
+            events.append("filter")
+            self.assertEqual(
+                {row["paragraph_id"] for row in candidates},
+                {"initial", "followup"},
+            )
+            return filtered
+
+        def fake_select(
+            candidates: list[dict[str, object]],
+            limit: int,
+            intent: str,
+        ) -> list[dict[str, object]]:
+            events.append("select")
+            self.assertIs(candidates, reranked)
+            self.assertEqual(limit, 2)
+            return candidates[:limit]
+
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch(
+                "nihaisha_kg.pdf_vector.build_query_plan",
+                side_effect=[["original"], ["original", "followup"]],
+            ),
+            patch(
+                "nihaisha_kg.pdf_vector.run_query_plan_search",
+                side_effect=[initial, followup],
+            ),
+            patch(
+                "nihaisha_kg.pdf_vector.fuse_query_rewrites",
+                return_value=filtered,
+            ) as fuse,
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", side_effect=fake_filter),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=fake_select),
+            patch(
+                "nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer",
+                return_value={
+                    "query": "问题",
+                    "intent": "general",
+                    "answer": "已生成",
+                    "citations": [],
+                    "related_knowledge_units": [],
+                    "safety_notice": "",
+                    "results": reranked,
+                },
+            ),
+        ):
+            answer = answer_pdf_rag(
+                "原始问题",
+                Path("/unused/rag.sqlite"),
+                mode="text",
+                limit=2,
+                reranker_backend=backend,
+            )
+
+        fuse.assert_called_once_with([initial, followup], limit=32)
+        self.assertEqual(events, ["filter", "rerank", "select"])
+        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(backend.calls[0], ("原始问题", filtered, 2))
+        self.assertEqual(
+            answer["rerank"],
+            {"model": "fake-reranker", "degraded_feature": "", "error": ""},
+        )
+
+    def test_answer_pdf_rag_synthesizes_after_rerank_degradation(self) -> None:
+        candidates = [{"paragraph_id": "p1", "text": "甲"}, {"paragraph_id": "p2", "text": "乙"}]
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, _query: str, limit: int = 8) -> list[dict[str, object]]:
+                return []
+
+        class DegradedReranker:
+            def rerank(
+                self,
+                _query: str,
+                incoming: list[dict[str, object]],
+                limit: int,
+            ) -> RerankOutcome:
+                return RerankOutcome(
+                    results=[dict(row) for row in incoming[:limit]],
+                    model="fake-reranker",
+                    degraded_feature="siliconflow_rerank",
+                    error="offline",
+                )
+
+        def fake_synthesize(_query: str, results: list[dict[str, object]]) -> dict[str, object]:
+            self.assertEqual([row["paragraph_id"] for row in results], ["p1", "p2"])
+            return {
+                "query": "问题",
+                "intent": "general",
+                "answer": "fallback evidence synthesized",
+                "citations": [],
+                "related_knowledge_units": [],
+                "safety_notice": "",
+                "results": results,
+            }
+
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=candidates),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=candidates),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", side_effect=fake_synthesize),
+        ):
+            answer = answer_pdf_rag(
+                "问题",
+                Path("/unused/rag.sqlite"),
+                mode="text",
+                limit=2,
+                reranker_backend=DegradedReranker(),
+            )
+
+        self.assertEqual(answer["answer"], "fallback evidence synthesized")
+        self.assertEqual(
+            answer["rerank"],
+            {
+                "model": "fake-reranker",
+                "degraded_feature": "siliconflow_rerank",
+                "error": "offline",
+            },
+        )
+
+    def test_answer_pdf_rag_validates_reranker_before_opening_store(self) -> None:
+        with patch("nihaisha_kg.pdf_vector.LocalVectorStore") as store:
+            with self.assertRaisesRegex(ValueError, "unsupported reranker"):
+                answer_pdf_rag("问题", Path("/unused/rag.sqlite"), mode="text", reranker="bad")
+        store.assert_not_called()
+
+    def test_answer_pdf_rag_explicit_siliconflow_uses_model_and_auto_without_key_skips(self) -> None:
+        candidate = {"paragraph_id": "p1", "text": "证据"}
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, _query: str, limit: int = 8) -> list[dict[str, object]]:
+                return []
+
+        class FakeReranker:
+            calls: list[tuple[str, list[dict[str, object]], int]] = []
+
+            def rerank(
+                self,
+                query: str,
+                candidates: list[dict[str, object]],
+                limit: int,
+            ) -> RerankOutcome:
+                self.calls.append((query, candidates, limit))
+                return RerankOutcome(results=[dict(candidate)], model="selected-model")
+
+        backend = FakeReranker()
+        synthesize_result = {
+            "query": "问题",
+            "intent": "general",
+            "answer": "已生成",
+            "citations": [],
+            "related_knowledge_units": [],
+            "safety_notice": "",
+            "results": [candidate],
+        }
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesize_result),
+            patch("nihaisha_kg.rerank.SiliconFlowReranker", return_value=backend) as factory,
+        ):
+            explicit = answer_pdf_rag(
+                "问题",
+                Path("/unused/rag.sqlite"),
+                mode="text",
+                reranker="siliconflow",
+                rerank_model="selected-model",
+            )
+
+        factory.assert_called_once_with(model="selected-model")
+        self.assertEqual(backend.calls, [("问题", [candidate], 1)])
+        self.assertEqual(explicit["rerank"]["model"], "selected-model")
+
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesize_result),
+            patch("nihaisha_kg.pdf_vector.siliconflow_api_key_available", return_value=False),
+            patch("nihaisha_kg.rerank.SiliconFlowReranker") as skipped_factory,
+        ):
+            automatic = answer_pdf_rag(
+                "问题",
+                Path("/unused/rag.sqlite"),
+                mode="text",
+                reranker="auto",
+            )
+
+        skipped_factory.assert_not_called()
+        self.assertEqual(
+            automatic["rerank"],
+            {"model": "none", "degraded_feature": "", "error": ""},
         )
 
     def test_answer_pdf_rag_returns_clinical_safety_boundary(self) -> None:
@@ -1195,6 +1441,7 @@ class PdfVectorTests(unittest.TestCase):
                 db_path=db_path,
                 embedding_backend=ToyDenseBackend(),
                 limit=3,
+                reranker="none",
             )
 
         self.assertEqual(answer["intent"], "clinical")
