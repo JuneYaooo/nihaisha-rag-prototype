@@ -428,6 +428,23 @@ class AnswerQualityTests(unittest.TestCase):
                 self.assertTrue(answer["citations"])
                 self.assertIn("桂枝汤", answer["citations"][0]["evidence_quote"])
 
+    def test_citation_uses_valid_later_anchor_span_after_product_mention(self) -> None:
+        cases = (
+            ("桂枝汤出处", "桂枝汤圆上市", "桂枝汤主之"),
+            ("五苓散出处", "五苓散装产品介绍", "五苓散主之"),
+            ("木香饼出处", "木香饼干上市", "木香饼外敷"),
+            ("太阳病原文", "太阳病人", "太阳病发热"),
+            ("一钱原文", "一钱包", "一钱重五克"),
+        )
+        for query, invalid, valid in cases:
+            with self.subTest(query=query):
+                paragraph = f"{invalid}。" + "背景说明" * 70 + f"。{valid}。"
+                answer = pdf_vector.synthesize_pdf_rag_answer(query, [result(paragraph)])
+                excerpt = answer["citations"][0]["evidence_quote"]
+                self.assertIn(valid, excerpt)
+                self.assertNotEqual(excerpt.strip("。"), invalid)
+                self.assertLessEqual(len(excerpt), 220)
+
     def test_cough_followups_do_not_inject_unseen_gastrointestinal_clues(self) -> None:
         questions = pdf_vector.build_followup_questions(
             "患者咳嗽、怕冷、无汗",

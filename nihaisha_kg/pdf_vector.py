@@ -2773,24 +2773,40 @@ def known_formula_terms_in_evidence(text: str) -> list[str]:
     return dedupe_keep_order(formula for _, formula in sorted(found))
 
 
-def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
+def validated_source_anchor_spans(
+    text: str,
+    anchors: list[str],
+) -> dict[str, list[tuple[int, int]]]:
     normalized = normalize_query_text(text)
-    if anchor in KNOWN_FORMULA_ANCHORS:
-        return anchor in known_formula_terms_in_evidence(normalized)
-    if anchor not in RELIABLE_SOURCE_NAMED_TERMS:
-        return False
-    offset = normalized.find(anchor)
-    invalid_continuations = NAMED_EVIDENCE_INVALID_CONTINUATIONS.get(anchor, ())
-    while offset >= 0:
-        right = normalized[offset + len(anchor) :]
-        if not any(right.startswith(continuation) for continuation in invalid_continuations):
-            return True
-        offset = normalized.find(anchor, offset + 1)
-    return False
+    validated: dict[str, list[tuple[int, int]]] = {}
+    for anchor in dedupe_keep_order(anchors):
+        if anchor not in KNOWN_FORMULA_ANCHORS and anchor not in RELIABLE_SOURCE_NAMED_TERMS:
+            continue
+        invalid_continuations = (
+            FORMULA_PRODUCT_CONTINUATIONS
+            if anchor in KNOWN_FORMULA_ANCHORS
+            else NAMED_EVIDENCE_INVALID_CONTINUATIONS.get(anchor, ())
+        )
+        offset = normalized.find(anchor)
+        spans: list[tuple[int, int]] = []
+        while offset >= 0:
+            end = offset + len(anchor)
+            right = normalized[end:]
+            if not any(right.startswith(continuation) for continuation in invalid_continuations):
+                spans.append((offset, end))
+            offset = normalized.find(anchor, offset + 1)
+        if spans:
+            validated[anchor] = spans
+    return validated
+
+
+def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
+    return anchor in validated_source_anchor_spans(text, [anchor])
 
 
 def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
-    return all(source_anchor_matches_evidence(anchor, text) for anchor in anchors)
+    validated = validated_source_anchor_spans(text, anchors)
+    return all(anchor in validated for anchor in anchors)
 
 
 def source_primary_evidence_texts(result: dict[str, object]) -> list[str]:
@@ -3321,17 +3337,31 @@ def dosage_evidence_snippet(text: str, max_chars: int = 520) -> str:
 
 
 def anchor_evidence_snippet(text: str, anchors: list[str], max_chars: int = 220) -> str:
-    sentences = [sentence.strip() for sentence in split_sentences(text) if sentence.strip()]
-    for sentence in sentences:
-        if all(anchor in sentence for anchor in anchors) and len(sentence) <= max_chars:
-            return sentence
-    selected = dedupe_keep_order(
-        sentence for anchor in anchors for sentence in sentences if anchor in sentence
-    )
+    validated = validated_source_anchor_spans(text, anchors)
+    sentence_matches = list(SENTENCE_RE.finditer(text))
+    for match in sentence_matches:
+        if all(
+            any(match.start() <= start and end <= match.end() for start, end in validated.get(anchor, []))
+            for anchor in anchors
+        ):
+            sentence = match.group(0).strip()
+            if len(sentence) <= max_chars:
+                return sentence
+    selected: list[str] = []
+    for anchor in anchors:
+        for start, end in validated.get(anchor, []):
+            match = next(
+                (item for item in sentence_matches if item.start() <= start and end <= item.end()),
+                None,
+            )
+            if match is not None:
+                selected.append(match.group(0).strip())
+                break
+    selected = dedupe_keep_order(selected)
     joined = " ".join(selected)
-    if selected and len(joined) <= max_chars and all(anchor in joined for anchor in anchors):
+    if selected and len(joined) <= max_chars and evidence_contains_source_anchors(joined, anchors):
         return joined
-    offsets = [text.find(anchor) for anchor in anchors]
+    offsets = [validated.get(anchor, [(-1, -1)])[0][0] for anchor in anchors]
     if offsets and all(offset >= 0 for offset in offsets):
         span_start = min(offsets)
         span_end = max(offset + len(anchor) for offset, anchor in zip(offsets, anchors))
