@@ -26,6 +26,8 @@ from nihaisha_kg.pdf_vector import (
     extract_knowledge_units_from_paragraph,
     filter_results_for_intent,
     synthesize_pdf_rag_answer,
+    knowledge_search_terms,
+    text_search_terms,
     write_build_traces,
     build_retrieval_units,
     build_faiss_vector_index,
@@ -1187,6 +1189,54 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["paragraph_id"], "p-b")
         self.assertIn("text", results[0]["retrieval_sources"])
         self.assertIn("猪肤汤", results[0]["matched_text_terms"])
+
+    def test_search_term_apis_delegate_to_boundary_preserving_normalization(self) -> None:
+        text_terms = text_search_terms("太阳病欲解时从什么时候到什么时候？")
+        knowledge_terms = knowledge_search_terms("比较与区别")
+
+        self.assertEqual(text_terms, ["太阳病", "欲解", "太陽病"])
+        self.assertNotIn("太阳", text_terms)
+        self.assertEqual(
+            knowledge_terms,
+            ["比较与区别", "比較與區別", "比较", "区别"],
+        )
+
+    def test_text_search_retrieves_across_traditional_and_simplified_scripts(self) -> None:
+        traditional_paragraph = ParsedParagraph(
+            paragraph_id="p-traditional",
+            doc_id="doc",
+            source_path="/tmp/traditional.pdf",
+            title="太陽病脈證",
+            page_start=1,
+            page_end=1,
+            text="太陽病的脈證可見發熱惡風。",
+        )
+        simplified_paragraph = ParsedParagraph(
+            paragraph_id="p-simplified",
+            doc_id="doc",
+            source_path="/tmp/simplified.pdf",
+            title="少阴病脉证",
+            page_start=2,
+            page_end=2,
+            text="少阴病的脉证可见咽痛。",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([traditional_paragraph, simplified_paragraph])
+
+            cases = (
+                ("太阳病的脉证有哪些？", "p-traditional", "太陽病"),
+                ("少陰病的脈證有哪些？", "p-simplified", "少阴"),
+            )
+            for query, expected_id, expected_anchor in cases:
+                with self.subTest(query=query):
+                    results = store.search_text(query, limit=2)
+
+                    self.assertTrue(results)
+                    self.assertEqual(results[0]["paragraph_id"], expected_id)
+                    self.assertIn(expected_anchor, results[0]["matched_text_terms"])
 
     def test_hybrid_search_combines_vector_and_text_sources(self) -> None:
         paragraph_a = ParsedParagraph(
