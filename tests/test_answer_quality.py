@@ -445,6 +445,24 @@ class AnswerQualityTests(unittest.TestCase):
                 self.assertNotEqual(excerpt.strip("。"), invalid)
                 self.assertLessEqual(len(excerpt), 220)
 
+    def test_multi_anchor_fallback_uses_validated_offsets_after_invalid_first_match(self) -> None:
+        query = "桂枝汤、麻黄汤出处"
+        paragraph = (
+            "桂枝汤圆上市。"
+            + "背景说明" * 70
+            + "桂枝汤主之"
+            + "补充材料" * 70
+            + "麻黄汤主之。"
+        )
+
+        answer = pdf_vector.synthesize_pdf_rag_answer(query, [result(paragraph)])
+        excerpt = answer["citations"][0]["evidence_quote"]
+
+        self.assertLessEqual(len(excerpt), 220)
+        self.assertIn("桂枝汤主之", excerpt)
+        self.assertIn("麻黄汤主之", excerpt)
+        self.assertNotIn("桂枝汤圆", excerpt)
+
     def test_cough_followups_do_not_inject_unseen_gastrointestinal_clues(self) -> None:
         questions = pdf_vector.build_followup_questions(
             "患者咳嗽、怕冷、无汗",

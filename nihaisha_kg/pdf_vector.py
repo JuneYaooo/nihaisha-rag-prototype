@@ -3385,7 +3385,7 @@ def anchor_evidence_snippet(text: str, anchors: list[str], max_chars: int = 220)
     snippets: list[str] = []
     for index, anchor in enumerate(present):
         budget = len(anchor) + shared_context + (1 if index < extra else 0)
-        offset = text.find(anchor)
+        offset = validated[anchor][0][0]
         context = budget - len(anchor)
         start = max(0, offset - context // 2)
         end = min(len(text), start + budget)
