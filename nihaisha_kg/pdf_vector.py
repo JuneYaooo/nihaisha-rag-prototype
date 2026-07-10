@@ -4087,6 +4087,89 @@ def synthesize_pdf_rag_answer(
     }
 
 
+TRACE_MAX_QUERY_CHARS = 500
+TRACE_MAX_PLAN_ITEMS = 8
+TRACE_MAX_OBSERVATIONS_PER_QUERY = 12
+TRACE_MAX_SELECTED_IDS = 50
+TRACE_CHANNELS = frozenset({"vector", "text", "knowledge"})
+
+
+def _safe_trace_string(value: object, *, max_chars: int) -> str:
+    from .rerank import sanitize_rerank_error
+
+    return sanitize_rerank_error(value, max_chars=max_chars)
+
+
+def _trace_dict_get(mapping: dict[str, object], key: str, default: object = None) -> object:
+    try:
+        return dict.get(mapping, key, default)
+    except (MemoryError, RecursionError, TypeError, ValueError):
+        return default
+
+
+def _trace_channels(result: dict[str, object]) -> list[str]:
+    channels: set[str] = set()
+    raw_sources = _trace_dict_get(result, "retrieval_sources")
+    if type(raw_sources) in {list, tuple}:
+        channels.update(
+            source
+            for source in raw_sources[:12]
+            if isinstance(source, str) and source in TRACE_CHANNELS
+        )
+    raw_ranks = _trace_dict_get(result, "channel_ranks")
+    if isinstance(raw_ranks, dict):
+        for channel in TRACE_CHANNELS:
+            rank = _trace_dict_get(raw_ranks, channel)
+            if isinstance(rank, int) and not isinstance(rank, bool) and 0 < rank <= 1_000_000:
+                channels.add(channel)
+    return sorted(channels)
+
+
+def _trace_query_plan(
+    plan: list[str],
+    results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    grouped: list[list[dict[str, object]]] = [
+        [] for _ in plan[:TRACE_MAX_PLAN_ITEMS]
+    ]
+    for result in results[:TRACE_MAX_SELECTED_IDS]:
+        paragraph_id = _safe_trace_string(
+            _trace_dict_get(result, "paragraph_id", ""),
+            max_chars=120,
+        )
+        raw_observations = _trace_dict_get(result, "rewrite_observations")
+        if type(raw_observations) not in {list, tuple}:
+            continue
+        for raw in raw_observations[:16]:
+            if not isinstance(raw, dict):
+                continue
+            rewrite_index = _trace_dict_get(raw, "rewrite_index")
+            rank = _trace_dict_get(raw, "rank")
+            if (
+                isinstance(rewrite_index, int)
+                and not isinstance(rewrite_index, bool)
+                and 1 <= rewrite_index <= len(grouped)
+                and isinstance(rank, int)
+                and not isinstance(rank, bool)
+                and 0 < rank <= 1_000_000
+                and len(grouped[rewrite_index - 1]) < TRACE_MAX_OBSERVATIONS_PER_QUERY
+            ):
+                grouped[rewrite_index - 1].append(
+                    {
+                        "paragraph_id": paragraph_id,
+                        "rank": rank,
+                        "channels": _trace_channels(result),
+                    }
+                )
+    return [
+        {
+            "query": _safe_trace_string(query, max_chars=TRACE_MAX_QUERY_CHARS),
+            "observations": grouped[index],
+        }
+        for index, query in enumerate(plan[:TRACE_MAX_PLAN_ITEMS])
+    ]
+
+
 def answer_pdf_rag(
     query: str,
     db_path: Path,
@@ -4099,9 +4182,19 @@ def answer_pdf_rag(
     reranker_backend: object | None = None,
     reranker: str = "none",
     rerank_model: str | None = None,
+    trace_enabled: bool = False,
 ) -> dict[str, object]:
     if reranker not in {"auto", "none", "siliconflow"}:
         raise ValueError(f"unsupported reranker: {reranker}")
+    if not isinstance(trace_enabled, bool):
+        raise TypeError("trace_enabled must be a boolean")
+    latency_ms = {
+        "planning": 0.0,
+        "retrieval": 0.0,
+        "rerank": 0.0,
+        "guide_lookup": 0.0,
+        "synthesis": 0.0,
+    }
     db_path = db_path.expanduser().resolve()
     if embedding_backend is not None:
         store = LocalVectorStore(db_path, embedding_backend=embedding_backend)
@@ -4116,8 +4209,11 @@ def answer_pdf_rag(
         )
         store = LocalVectorStore(db_path, embedding_backend=backend)
     candidate_limit = max(limit * 4, 16)
+    phase_started = time.perf_counter()
     intent = detect_answer_intent(query)
     initial_plan = build_query_plan(query, intent=intent)
+    latency_ms["planning"] += (time.perf_counter() - phase_started) * 1000.0
+    phase_started = time.perf_counter()
     results = run_query_plan_search(
         store,
         initial_plan,
@@ -4125,12 +4221,18 @@ def answer_pdf_rag(
         mode=mode,
         intent=intent,
     )
+    initial_results = results
+    latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
+    phase_started = time.perf_counter()
     followup_plan = [
         planned_query
         for planned_query in build_query_plan(query, intent=intent, seed_results=results)
         if planned_query not in initial_plan
     ]
+    latency_ms["planning"] += (time.perf_counter() - phase_started) * 1000.0
+    followup_results: list[dict[str, object]] = []
     if followup_plan:
+        phase_started = time.perf_counter()
         followup_results = run_query_plan_search(
             store,
             followup_plan,
@@ -4139,6 +4241,8 @@ def answer_pdf_rag(
             intent=intent,
         )
         results = fuse_query_rewrites([results, followup_results], limit=max(candidate_limit * 2, 32))
+        latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
+    phase_started = time.perf_counter()
     intent_results = filter_results_for_intent(query, intent, results)
     rerank_outcome = None
     rerank_limit = min(len(intent_results), max(limit * 3, 12))
@@ -4156,8 +4260,11 @@ def answer_pdf_rag(
         )
     if rerank_outcome is not None:
         intent_results = rerank_outcome.results
+    latency_ms["rerank"] += (time.perf_counter() - phase_started) * 1000.0
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
+    phase_started = time.perf_counter()
     answer = synthesize_pdf_rag_answer(query, results)
+    latency_ms["synthesis"] += (time.perf_counter() - phase_started) * 1000.0
     if rerank_outcome is not None:
         from .rerank import (
             PUBLIC_RERANK_ERROR_MAX_CHARS,
@@ -4192,7 +4299,9 @@ def answer_pdf_rag(
             for unit in answer.get("related_knowledge_units", []) or []
         ),
     ]
+    phase_started = time.perf_counter()
     related_guide_nodes = store.search_guide_nodes(" ".join(guide_query_parts), limit=8)
+    latency_ms["guide_lookup"] += (time.perf_counter() - phase_started) * 1000.0
     answer["related_guide_nodes"] = related_guide_nodes
     answer["differentiation_flow"] = build_differentiation_flow(query, related_guide_nodes)
     answer["followup_questions"] = build_followup_questions(
@@ -4201,6 +4310,53 @@ def answer_pdf_rag(
         related_guide_nodes,
         list(answer.get("related_knowledge_units", []) or []),
     )
+    if trace_enabled:
+        from .rerank import (
+            PUBLIC_RERANK_FEATURE_MAX_CHARS,
+            PUBLIC_RERANK_MODEL_MAX_CHARS,
+            safe_rerank_metadata_value,
+        )
+
+        selected_ids = [
+            _safe_trace_string(
+                _trace_dict_get(result, "paragraph_id", ""),
+                max_chars=120,
+            )
+            for result in results[:TRACE_MAX_SELECTED_IDS]
+        ]
+        selected_ids = [paragraph_id for paragraph_id in selected_ids if paragraph_id]
+        retrieval_channels = sorted(
+            {
+                channel
+                for result in results[:TRACE_MAX_SELECTED_IDS]
+                for channel in _trace_channels(result)
+            }
+        )
+        model_value = safe_rerank_metadata_value(
+            rerank_outcome.model if rerank_outcome is not None else "none",
+            max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
+        ) or "none"
+        degraded_value = safe_rerank_metadata_value(
+            rerank_outcome.degraded_feature if rerank_outcome is not None else "",
+            max_chars=PUBLIC_RERANK_FEATURE_MAX_CHARS,
+        )
+        answer["trace"] = {
+            "normalized_query": _safe_trace_string(
+                normalize_query_text(query),
+                max_chars=TRACE_MAX_QUERY_CHARS,
+            ),
+            "intent": _safe_trace_string(intent, max_chars=40),
+            "query_plan": _trace_query_plan(initial_plan, initial_results),
+            "followup_plan": _trace_query_plan(followup_plan, followup_results),
+            "retrieval_channels": retrieval_channels,
+            "selected_paragraph_ids": selected_ids,
+            "reranker": model_value,
+            "degraded_features": [degraded_value] if degraded_value else [],
+            "latency_ms": {
+                phase: max(0.0, round(float(value), 3))
+                for phase, value in latency_ms.items()
+            },
+        }
     return answer
 
 

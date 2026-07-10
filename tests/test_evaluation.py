@@ -9,6 +9,7 @@ from pathlib import Path
 from nihaisha_kg.evaluation import (
     EvalCase,
     aggregate_metrics,
+    evaluate_database,
     evaluate_ranked_ids,
     load_eval_cases,
 )
@@ -155,6 +156,63 @@ class EvaluationTests(unittest.TestCase):
             aggregate_metrics([{"hit_at_1": 1.0}, {"recall_at_5": 0.5}]),
             {"hit_at_1": 0.5, "recall_at_5": 0.25},
         )
+
+    def test_evaluate_database_searches_each_case_and_aggregates(self) -> None:
+        cases = [
+            EvalCase("one", "first", "lookup", ("p1",)),
+            EvalCase("two", "second", "lookup", ("p3",), ("p9",)),
+        ]
+
+        class FakeStore:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int, str]] = []
+
+            def search(self, query: str, limit: int, mode: str) -> list[dict[str, object]]:
+                self.calls.append((query, limit, mode))
+                return {
+                    "first": [{"paragraph_id": "p1"}, {"paragraph_id": "p1"}],
+                    "second": [{"paragraph_id": "p9"}, {"paragraph_id": "p3"}],
+                }[query]
+
+        store = FakeStore()
+        original = list(cases)
+
+        payload = evaluate_database(store, cases, mode="text", limit=10)
+
+        self.assertEqual(store.calls, [("first", 10, "text"), ("second", 10, "text")])
+        self.assertEqual(payload["cases"], 2)
+        self.assertEqual(len(payload["results"]), 2)
+        self.assertEqual(payload["results"][0]["ranked_paragraph_ids"], ["p1", "p1"])
+        self.assertEqual(payload["results"][0]["metrics"]["reciprocal_rank"], 1.0)
+        self.assertEqual(payload["aggregate"]["hit_at_1"], 0.5)
+        self.assertEqual(cases, original)
+        json.dumps(payload)
+
+    def test_evaluate_database_handles_empty_cases_without_searching(self) -> None:
+        class NoSearchStore:
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                raise AssertionError("empty evaluation must not search")
+
+        self.assertEqual(
+            evaluate_database(NoSearchStore(), [], mode="knowledge"),
+            {"cases": 0, "aggregate": {}, "results": []},
+        )
+
+    def test_evaluate_database_validates_limit_and_mode_before_searching(self) -> None:
+        class NoSearchStore:
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                raise AssertionError("invalid arguments must not search")
+
+        store = NoSearchStore()
+        case = EvalCase("one", "query", "lookup", ("p1",))
+        for invalid_limit in (True, 0, -1, 1.5, "10"):
+            with self.subTest(limit=invalid_limit):
+                with self.assertRaises((TypeError, ValueError)):
+                    evaluate_database(store, [case], mode="text", limit=invalid_limit)  # type: ignore[arg-type]
+        for invalid_mode in ("", "semantic", None):
+            with self.subTest(mode=invalid_mode):
+                with self.assertRaises((TypeError, ValueError)):
+                    evaluate_database(store, [case], mode=invalid_mode)  # type: ignore[arg-type]
 
     def test_golden_v1_loads_seven_unique_cases(self) -> None:
         path = Path(__file__).resolve().parents[1] / "evals" / "golden_v1.jsonl"

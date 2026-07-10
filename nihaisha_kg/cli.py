@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
+import sys
+import time
 from pathlib import Path
 
+from .diagnostics import doctor as run_doctor
+from .evaluation import evaluate_database, load_eval_cases
+from .normalization import normalize_query_text
 from .pdf_vector import (
     LocalVectorStore,
     answer_pdf_rag,
@@ -11,10 +17,91 @@ from .pdf_vector import (
     build_faiss_vector_index,
     build_pdf_vector_store,
     create_embedding_backend_for_db,
+    load_faiss_module,
+    siliconflow_api_key_available,
+)
+from .rerank import (
+    PUBLIC_RERANK_FEATURE_MAX_CHARS,
+    PUBLIC_RERANK_MODEL_MAX_CHARS,
+    SiliconFlowReranker,
+    safe_rerank_metadata_value,
+    sanitize_rerank_error,
 )
 
 
 DEFAULT_DB = Path("data/pdf_rag_bge_m3/rag.sqlite")
+DEFAULT_EVAL_CASES = Path("evals/golden_v1.jsonl")
+TRACE_CHANNELS = frozenset({"vector", "text", "knowledge"})
+TRACE_MAX_IDS = 50
+
+
+def _trace_text(value: object, max_chars: int = 500) -> str:
+    return sanitize_rerank_error(value, max_chars=max_chars)
+
+
+def _dict_get(mapping: dict[str, object], key: str, default: object = None) -> object:
+    try:
+        return dict.get(mapping, key, default)
+    except (MemoryError, RecursionError, TypeError, ValueError):
+        return default
+
+
+def _json_fallback(value: object) -> str:
+    return f"<{type(value).__name__}>"[:80]
+
+
+def _search_trace(
+    query: str,
+    results: list[dict[str, object]],
+    *,
+    reranker_model: object,
+    degraded_feature: object = "",
+    latency_ms: float = 0.0,
+) -> dict[str, object]:
+    selected_ids: list[str] = []
+    channels: set[str] = set()
+    channel_ranks: list[dict[str, object]] = []
+    for selected_rank, row in enumerate(results[:TRACE_MAX_IDS], start=1):
+        paragraph_id = _trace_text(_dict_get(row, "paragraph_id", ""), max_chars=120)
+        if paragraph_id:
+            selected_ids.append(paragraph_id)
+        entry: dict[str, object] = {"paragraph_id": paragraph_id}
+        raw_ranks = _dict_get(row, "channel_ranks")
+        if isinstance(raw_ranks, dict):
+            for channel in sorted(TRACE_CHANNELS):
+                rank = _dict_get(raw_ranks, channel)
+                if isinstance(rank, int) and not isinstance(rank, bool) and 0 < rank <= 1_000_000:
+                    entry[channel] = rank
+                    channels.add(channel)
+        raw_sources = _dict_get(row, "retrieval_sources")
+        if type(raw_sources) in {list, tuple}:
+            for source in raw_sources[:12]:
+                if isinstance(source, str) and source in TRACE_CHANNELS:
+                    channels.add(source)
+                    entry.setdefault(source, selected_rank)
+        channel_ranks.append(entry)
+    degraded = safe_rerank_metadata_value(
+        degraded_feature,
+        max_chars=PUBLIC_RERANK_FEATURE_MAX_CHARS,
+    )
+    return {
+        "normalized_query": _trace_text(normalize_query_text(query), max_chars=500),
+        "retrieval_channels": sorted(channels),
+        "channel_ranks": channel_ranks,
+        "selected_paragraph_ids": selected_ids,
+        "reranker": safe_rerank_metadata_value(
+            reranker_model,
+            max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
+        ) or "none",
+        "degraded_features": [degraded] if degraded else [],
+        "latency_ms": {"search": max(0.0, round(float(latency_ms), 3))},
+    }
+
+
+def _print_cli_error(command: str, error: BaseException) -> int:
+    message = sanitize_rerank_error(error, max_chars=240)
+    print(f"{command} failed: {message or type(error).__name__}", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,6 +113,19 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = sub.add_parser("stats", help="show database counts")
     stats.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    doctor = sub.add_parser("doctor", help="diagnose database and FAISS artifacts")
+    doctor.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    evaluate = sub.add_parser("evaluate", help="evaluate retrieval against JSONL cases")
+    evaluate.add_argument("--db", type=Path, default=DEFAULT_DB)
+    evaluate.add_argument("--cases", type=Path, default=DEFAULT_EVAL_CASES)
+    evaluate.add_argument(
+        "--mode",
+        choices=["hybrid", "vector", "text", "knowledge"],
+        default="hybrid",
+    )
+    evaluate.add_argument("--limit", type=int, default=10)
 
     build = sub.add_parser("build", help="build a complete local PDF RAG database")
     build.add_argument("--pdf-dir", type=Path, required=True)
@@ -91,6 +191,13 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("--model", default="BAAI/bge-m3")
     search.add_argument("--batch-size", type=int, default=32)
     search.add_argument("--json", action="store_true")
+    search.add_argument(
+        "--reranker",
+        choices=["auto", "none", "siliconflow"],
+        default="auto",
+    )
+    search.add_argument("--rerank-model", default=None)
+    search.add_argument("--trace", action="store_true")
 
     answer = sub.add_parser("answer", help="answer with grounded citations")
     answer.add_argument("query")
@@ -109,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--model", default="BAAI/bge-m3")
     answer.add_argument("--batch-size", type=int, default=32)
     answer.add_argument("--json", action="store_true")
+    answer.add_argument(
+        "--reranker",
+        choices=["auto", "none", "siliconflow"],
+        default="auto",
+    )
+    answer.add_argument("--rerank-model", default=None)
+    answer.add_argument("--trace", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -116,6 +230,28 @@ def main(argv: list[str] | None = None) -> int:
         store = LocalVectorStore(args.db)
         payload = store.stats()
         payload.update(store.read_meta())
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "doctor":
+        try:
+            report = run_doctor(args.db, faiss_loader=load_faiss_module)
+        except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError) as exc:
+            return _print_cli_error("doctor", exc)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("status") == "ok" else 1
+
+    if args.command == "evaluate":
+        try:
+            cases = load_eval_cases(args.cases)
+            if args.mode in {"text", "knowledge"}:
+                store = LocalVectorStore(args.db)
+            else:
+                backend = create_embedding_backend_for_db(args.db)
+                store = LocalVectorStore(args.db, embedding_backend=backend)
+            payload = evaluate_database(store, cases, mode=args.mode, limit=args.limit)
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+            return _print_cli_error("evaluate", exc)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
@@ -172,19 +308,51 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "search":
-        if args.mode in {"text", "knowledge"}:
-            store = LocalVectorStore(args.db)
-        else:
-            backend = create_embedding_backend_for_db(
-                args.db,
-                embedding=args.embedding,
-                model=args.model,
-                batch_size=args.batch_size,
-            )
-            store = LocalVectorStore(args.db, embedding_backend=backend)
-        results = store.search(args.query, limit=args.limit, mode=args.mode)
+        try:
+            if args.mode in {"text", "knowledge"}:
+                store = LocalVectorStore(args.db)
+            else:
+                backend = create_embedding_backend_for_db(
+                    args.db,
+                    embedding=args.embedding,
+                    model=args.model,
+                    batch_size=args.batch_size,
+                )
+                store = LocalVectorStore(args.db, embedding_backend=backend)
+            started = time.perf_counter()
+            candidate_limit = max(args.limit * 3, 12) if args.reranker != "none" else args.limit
+            candidates = store.search(args.query, limit=candidate_limit, mode=args.mode)
+            rerank_outcome = None
+            if args.reranker == "siliconflow" or (
+                args.reranker == "auto" and siliconflow_api_key_available()
+            ):
+                rerank_outcome = SiliconFlowReranker(model=args.rerank_model).rerank(
+                    args.query,
+                    candidates,
+                    limit=args.limit,
+                )
+                results = list(rerank_outcome.results[: args.limit])
+            else:
+                results = list(candidates[: args.limit])
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+            return _print_cli_error("search", exc)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         if args.json:
-            print(json.dumps(results, ensure_ascii=False, indent=2))
+            payload: object = results
+            if args.trace:
+                payload = {
+                    "results": results,
+                    "trace": _search_trace(
+                        args.query,
+                        results,
+                        reranker_model=(rerank_outcome.model if rerank_outcome else "none"),
+                        degraded_feature=(
+                            rerank_outcome.degraded_feature if rerank_outcome else ""
+                        ),
+                        latency_ms=elapsed_ms,
+                    ),
+                }
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_fallback))
             return 0
         for index, item in enumerate(results, start=1):
             print(
@@ -199,18 +367,41 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(str(item["text"])[:500])
             print()
+        if args.trace:
+            print(
+                json.dumps(
+                    _search_trace(
+                        args.query,
+                        results,
+                        reranker_model=(rerank_outcome.model if rerank_outcome else "none"),
+                        degraded_feature=(
+                            rerank_outcome.degraded_feature if rerank_outcome else ""
+                        ),
+                        latency_ms=elapsed_ms,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=_json_fallback,
+                )
+            )
         return 0
 
     if args.command == "answer":
-        payload = answer_pdf_rag(
-            args.query,
-            db_path=args.db,
-            limit=args.limit,
-            mode=args.mode,
-            embedding=args.embedding,
-            model=args.model,
-            batch_size=args.batch_size,
-        )
+        try:
+            payload = answer_pdf_rag(
+                args.query,
+                db_path=args.db,
+                limit=args.limit,
+                mode=args.mode,
+                embedding=args.embedding,
+                model=args.model,
+                batch_size=args.batch_size,
+                reranker=args.reranker,
+                rerank_model=args.rerank_model,
+                trace_enabled=args.trace,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+            return _print_cli_error("answer", exc)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0

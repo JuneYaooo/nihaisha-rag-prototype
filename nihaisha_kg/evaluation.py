@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 
+SUPPORTED_EVALUATION_MODES = frozenset({"hybrid", "vector", "text", "knowledge"})
+
+
 @dataclass(frozen=True)
 class EvalCase:
     case_id: str
@@ -142,3 +145,46 @@ def aggregate_metrics(rows: Iterable[Mapping[str, float]]) -> dict[str, float]:
         for key, value in row.items():
             totals[key] = totals.get(key, 0.0) + float(value)
     return {key: totals[key] / len(rows) for key in sorted(totals)}
+
+
+def evaluate_database(
+    store: object,
+    cases: Iterable[EvalCase],
+    mode: str,
+    limit: int = 10,
+) -> dict[str, object]:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be a positive integer")
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    if not isinstance(mode, str):
+        raise TypeError("mode must be a supported string")
+    if mode not in SUPPORTED_EVALUATION_MODES:
+        raise ValueError(f"unsupported evaluation mode: {mode}")
+
+    case_list = list(cases)
+    results: list[dict[str, object]] = []
+    metric_rows: list[dict[str, float]] = []
+    for case in case_list:
+        search_results = store.search(case.query, limit=limit, mode=mode)  # type: ignore[attr-defined]
+        ranked_ids = [
+            str(row["paragraph_id"])
+            for row in search_results
+            if isinstance(row, Mapping) and row.get("paragraph_id") is not None
+        ]
+        metrics = evaluate_ranked_ids(case, ranked_ids, k_values=(1, 5, 10))
+        metric_rows.append(metrics)
+        results.append(
+            {
+                "case_id": case.case_id,
+                "query": case.query,
+                "task_type": case.task_type,
+                "ranked_paragraph_ids": ranked_ids,
+                "metrics": dict(metrics),
+            }
+        )
+    return {
+        "cases": len(case_list),
+        "aggregate": aggregate_metrics(metric_rows),
+        "results": results,
+    }
