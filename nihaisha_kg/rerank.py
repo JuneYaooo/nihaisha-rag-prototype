@@ -47,8 +47,19 @@ def sanitize_rerank_error(
     )
     message = re.sub(
         r'''(?ix)
+        (?<![A-Za-z0-9_-])
         (?P<key_quote>["']?)
-        (?P<key>api[_-]?key|access[_-]?token|token|secret|authorization)
+        (?P<key>
+            api[_-]?key
+            | access[_-]?token
+            | client[_-]?secret
+            | private[_-]?key
+            | password
+            | passwd
+            | authorization
+            | token
+            | secret
+        )
         (?P=key_quote)\s*[:=]\s*
         (?:
             "(?:\\.|[^"])*"
@@ -300,4 +311,10 @@ class SiliconFlowReranker:
             status_code = getattr(error, "status_code", None)
         if isinstance(status_code, int) and not isinstance(status_code, bool):
             return status_code == 429 or status_code >= 500
-        return True
+        if isinstance(error, (TimeoutError, ConnectionError)):
+            return True
+        try:
+            import requests
+        except ImportError:
+            return False
+        return isinstance(error, (requests.Timeout, requests.ConnectionError))

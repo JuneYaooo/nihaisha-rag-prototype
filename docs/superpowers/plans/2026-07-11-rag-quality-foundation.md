@@ -1000,11 +1000,13 @@ complete provider result array before mapping it, then sort by descending finite
 with original candidate index as the explicit tie-break, and reject any response that does not
 contain exactly the requested `top_n` unique entries. Bound requests to 100 nonblank documents,
 4,000 characters per document, and 2,000 query characters; treat `None` title/text values as empty.
-Retry only transport-like failures, HTTP 429, and HTTP 5xx; schema errors and other HTTP 4xx stop
-immediately. Sanitize every adapter error through the shared rerank-error sanitizer, removing
-structured credentials, bearer/sk-like tokens, URL userinfo, and control characters and capping
-output at 240 characters. Strict failures raise only the sanitized runtime error with raw provider
-exception context suppressed.
+Retry only built-in or Requests timeout/connection failures, HTTP 429, and HTTP 5xx; schema errors,
+other HTTP 4xx, and statusless programming exceptions stop immediately. Sanitize every adapter
+error through the shared rerank-error sanitizer, removing structured `api_key`/`api-key`, `token`,
+`access_token`, `secret`, `password`, `passwd`, `client_secret`/`client-secret`,
+`private_key`/`private-key`, and `authorization` values, plus bearer/sk-like tokens, URL userinfo,
+and control characters, and cap output at 240 characters. Strict failures raise only the sanitized
+runtime error with raw provider exception context suppressed.
 
 - [x] **Step 4: Rerank once after all query rewrites**
 

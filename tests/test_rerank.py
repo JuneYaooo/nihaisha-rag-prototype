@@ -6,6 +6,8 @@ import traceback
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from nihaisha_kg.rerank import (
     MAX_RERANK_DOCUMENTS,
     MAX_RERANK_DOCUMENT_CHARS,
@@ -59,6 +61,12 @@ class RerankTests(unittest.TestCase):
             ("token='unknown secret'", "unknown secret"),
             ("{'access_token': 'access secret'}", "access secret"),
             ('{"secret" = "quoted secret"}', "quoted secret"),
+            ('{"password": "password secret"}', "password secret"),
+            ("{'passwd': 'passwd secret'}", "passwd secret"),
+            ('client_secret="client secret"', "client secret"),
+            ("'client-secret'='hyphen client secret'", "hyphen client secret"),
+            ('{"private_key": "private key secret"}', "private key secret"),
+            ("private-key='hyphen private key secret'", "hyphen private key secret"),
             ('{"authorization": "Bearer nested-secret"}', "nested-secret"),
             ("https://private-user:private-pass@example.test/path", "private-user"),
             ("https://private-user:private-pass@example.test/path", "private-pass"),
@@ -272,14 +280,21 @@ class RerankTests(unittest.TestCase):
                 self.assertEqual(len(session.calls), 1)
                 sleep.assert_not_called()
 
-    def test_retry_policy_stops_on_schema_and_400_but_retries_transport_429_and_5xx(self) -> None:
+    def test_retry_policy_only_retries_transport_429_and_5xx(self) -> None:
         candidates = [{"text": "甲"}]
         cases = (
             ("schema", FakeSession({"results": [{}]}), 1),
             ("http400", FakeSession(error=FakeHttpError(400)), 1),
             ("http429", FakeSession(error=FakeHttpError(429)), 3),
             ("http500", FakeSession(error=FakeHttpError(500)), 3),
-            ("transport", FakeSession(error=RuntimeError("offline")), 3),
+            ("builtin timeout", FakeSession(error=TimeoutError("timed out")), 3),
+            ("builtin connection", FakeSession(error=ConnectionError("offline")), 3),
+            ("requests timeout", FakeSession(error=requests.Timeout("timed out")), 3),
+            ("requests connection", FakeSession(error=requests.ConnectionError("offline")), 3),
+            ("value error", FakeSession(error=ValueError("programming error")), 1),
+            ("type error", FakeSession(error=TypeError("programming error")), 1),
+            ("key error", FakeSession(error=KeyError("programming error")), 1),
+            ("runtime error", FakeSession(error=RuntimeError("programming error")), 1),
         )
 
         for name, session, expected_calls in cases:
