@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Iterable, Mapping
 
 
 SUPPORTED_EVALUATION_MODES = frozenset({"hybrid", "vector", "text", "knowledge"})
+MAX_EVALUATION_CASES = 10_000
+MAX_EVALUATION_PARAGRAPH_ID_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -162,16 +165,24 @@ def evaluate_database(
     if mode not in SUPPORTED_EVALUATION_MODES:
         raise ValueError(f"unsupported evaluation mode: {mode}")
 
-    case_list = list(cases)
+    case_list = list(islice(cases, MAX_EVALUATION_CASES + 1))
+    if len(case_list) > MAX_EVALUATION_CASES:
+        raise ValueError(f"evaluation cases exceed maximum of {MAX_EVALUATION_CASES}")
     results: list[dict[str, object]] = []
     metric_rows: list[dict[str, float]] = []
     for case in case_list:
         search_results = store.search(case.query, limit=limit, mode=mode)  # type: ignore[attr-defined]
-        ranked_ids = [
-            str(row["paragraph_id"])
-            for row in search_results
-            if isinstance(row, Mapping) and row.get("paragraph_id") is not None
-        ]
+        ranked_ids: list[str] = []
+        for row in islice(search_results, limit):
+            if type(row) is not dict:
+                continue
+            paragraph_id = dict.get(row, "paragraph_id")
+            if (
+                type(paragraph_id) is str
+                and paragraph_id
+                and len(paragraph_id) <= MAX_EVALUATION_PARAGRAPH_ID_CHARS
+            ):
+                ranked_ids.append(paragraph_id)
         metrics = evaluate_ranked_ids(case, ranked_ids, k_values=(1, 5, 10))
         metric_rows.append(metrics)
         results.append(

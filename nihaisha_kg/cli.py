@@ -25,6 +25,7 @@ from .rerank import (
     PUBLIC_RERANK_FEATURE_MAX_CHARS,
     PUBLIC_RERANK_MODEL_MAX_CHARS,
     SiliconFlowReranker,
+    normalize_rerank_outcome_results,
     safe_rerank_metadata_value,
     sanitize_rerank_error,
 )
@@ -346,7 +347,14 @@ def main(argv: list[str] | None = None) -> int:
                     batch_size=args.batch_size,
                 )
                 store = LocalVectorStore(args.db, embedding_backend=backend)
-            started = time.perf_counter()
+            started: float | None = None
+            if args.json and args.trace:
+                try:
+                    clock_value = float(time.perf_counter())
+                    if math.isfinite(clock_value):
+                        started = clock_value
+                except Exception:
+                    started = None
             candidate_limit = max(args.limit * 3, 12) if args.reranker != "none" else args.limit
             candidates = store.search(args.query, limit=candidate_limit, mode=args.mode)
             rerank_outcome = None
@@ -358,12 +366,22 @@ def main(argv: list[str] | None = None) -> int:
                     candidates,
                     limit=args.limit,
                 )
-                results = list(rerank_outcome.results[: args.limit])
+                results = normalize_rerank_outcome_results(
+                    rerank_outcome,
+                    limit=args.limit,
+                )
             else:
                 results = list(candidates[: args.limit])
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
             return _print_cli_error("search", exc)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        elapsed_ms = 0.0
+        if started is not None:
+            try:
+                elapsed_ms = _bounded_latency_ms(
+                    (float(time.perf_counter()) - started) * 1000.0
+                )
+            except Exception:
+                elapsed_ms = 0.0
         if args.json:
             payload: object = results
             if args.trace:

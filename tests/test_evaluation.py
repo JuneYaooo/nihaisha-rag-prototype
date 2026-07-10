@@ -214,6 +214,76 @@ class EvaluationTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     evaluate_database(store, [case], mode=invalid_mode)  # type: ignore[arg-type]
 
+    def test_evaluate_database_consumes_at_most_limit_search_rows(self) -> None:
+        pulls = 0
+
+        def infinite_results():  # type: ignore[no-untyped-def]
+            nonlocal pulls
+            index = 0
+            while True:
+                pulls += 1
+                yield {"paragraph_id": f"p{index}"}
+                index += 1
+
+        class FakeStore:
+            def search(self, *_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+                return infinite_results()
+
+        case = EvalCase("one", "query", "lookup", ("p0",))
+        payload = evaluate_database(FakeStore(), [case], mode="text", limit=1)
+
+        self.assertEqual(pulls, 1)
+        self.assertEqual(payload["results"][0]["ranked_paragraph_ids"], ["p0"])
+
+    def test_evaluate_database_skips_hostile_or_invalid_result_rows(self) -> None:
+        class HostileMapping(dict[str, object]):
+            def get(self, *_args: object, **_kwargs: object) -> object:
+                raise RuntimeError("hostile mapping")
+
+            def __getitem__(self, _key: object) -> object:
+                raise RuntimeError("hostile mapping")
+
+        class HostileString(str):
+            def __str__(self) -> str:
+                raise RuntimeError("hostile string")
+
+        rows: list[object] = [
+            HostileMapping(paragraph_id="hidden"),
+            {"paragraph_id": HostileString("hidden")},
+            {"paragraph_id": ""},
+            {"paragraph_id": "x" * 257},
+            {"paragraph_id": "safe"},
+        ]
+
+        class FakeStore:
+            def search(self, *_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+                return iter(rows)
+
+        case = EvalCase("one", "query", "lookup", ("safe",))
+        payload = evaluate_database(FakeStore(), [case], mode="text", limit=10)
+
+        self.assertEqual(payload["results"][0]["ranked_paragraph_ids"], ["safe"])
+        json.dumps(payload, allow_nan=False)
+
+    def test_evaluate_database_rejects_unbounded_case_iterables_before_search(self) -> None:
+        searches = 0
+
+        class FakeStore:
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                nonlocal searches
+                searches += 1
+                return []
+
+        case = EvalCase("one", "query", "lookup", ("p1",))
+
+        def infinite_cases():  # type: ignore[no-untyped-def]
+            while True:
+                yield case
+
+        with self.assertRaisesRegex(ValueError, "evaluation cases exceed maximum"):
+            evaluate_database(FakeStore(), infinite_cases(), mode="text", limit=1)
+        self.assertEqual(searches, 0)
+
     def test_golden_v1_loads_seven_unique_cases(self) -> None:
         path = Path(__file__).resolve().parents[1] / "evals" / "golden_v1.jsonl"
 

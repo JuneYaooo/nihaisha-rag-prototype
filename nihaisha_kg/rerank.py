@@ -35,6 +35,14 @@ def sanitize_rerank_error(
             raw_message = str(error)
         except Exception:
             raw_message = f"<{type(error).__name__}>"
+    raw_message = re.sub(
+        r'''(?ix)
+        (?P<prefix>["']?authorization["']?\s*[:=]\s*)
+        [^\r\n\x00-\x1f\x7f-\x9f]*
+        ''',
+        r"\g<prefix>[REDACTED]",
+        raw_message,
+    )
     message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", raw_message)
     secrets = [api_key, os.getenv("SILICONFLOW_API_KEY")]
     for secret in secrets:
@@ -92,6 +100,34 @@ def safe_rerank_metadata_value(value: object, *, max_chars: int) -> str:
         marker = f"<{type(value).__name__}>"
         return marker[:max_chars]
     return sanitize_rerank_error(value, max_chars=max_chars)
+
+
+def normalize_rerank_results(results: object, *, limit: int) -> list[dict[str, object]]:
+    """Copy a bounded reranker result list without invoking overridable container methods."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise ValueError("reranker result limit must be a nonnegative integer")
+    if type(results) is not list:
+        raise RuntimeError("invalid reranker results container")
+    source_length = list.__len__(results)
+    normalized: list[dict[str, object]] = []
+    for index in range(min(source_length, limit, MAX_RERANK_DOCUMENTS)):
+        row = list.__getitem__(results, index)
+        if type(row) is not dict:
+            raise RuntimeError("invalid reranker result row")
+        normalized.append(dict.copy(row))
+    return normalized
+
+
+def normalize_rerank_outcome_results(
+    outcome: object,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    try:
+        results = object.__getattribute__(outcome, "results")
+    except Exception:
+        raise RuntimeError("invalid reranker results container") from None
+    return normalize_rerank_results(results, limit=limit)
 
 
 @dataclass(frozen=True)

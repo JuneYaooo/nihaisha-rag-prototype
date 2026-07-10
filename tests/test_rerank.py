@@ -13,6 +13,8 @@ from nihaisha_kg.rerank import (
     MAX_RERANK_DOCUMENT_CHARS,
     MAX_RERANK_QUERY_CHARS,
     SiliconFlowReranker,
+    normalize_rerank_outcome_results,
+    normalize_rerank_results,
     sanitize_rerank_error,
 )
 
@@ -91,6 +93,52 @@ class RerankTests(unittest.TestCase):
                 self.assertNotIn("supersecret", sanitized)
                 self.assertNotIn("Bearer", sanitized)
                 self.assertIn("[REDACTED]", sanitized)
+
+    def test_sanitizer_redacts_entire_authorization_field_across_schemes(self) -> None:
+        credential = "credential-sentinel"
+        messages = (
+            f"Authorization: Basic {credential}",
+            f"authorization=Digest username={credential}, realm=private, nonce=value",
+            f'Authorization: "Basic {credential}"',
+            f"'Authorization'='Digest username={credential}, realm=private'",
+            f"Authorization: Bearer {credential}\r\nnext-line: retained",
+            f"Authorization=Basic {credential}\x00next-field: retained",
+        )
+
+        for message in messages:
+            with self.subTest(kind=message.split(maxsplit=1)[0]):
+                sanitized = sanitize_rerank_error(message)
+                self.assertFalse(credential in sanitized)
+                self.assertIn("[REDACTED]", sanitized)
+        self.assertIn("next-line: retained", sanitize_rerank_error(messages[-2]))
+        self.assertIn("next-field: retained", sanitize_rerank_error(messages[-1]))
+
+    def test_normalize_rerank_results_uses_exact_bounded_containers(self) -> None:
+        class HostileList(list[dict[str, object]]):
+            def __getitem__(self, _index: object) -> object:
+                return [{"paragraph_id": str(index)} for index in range(100)]
+
+            def __iter__(self):  # type: ignore[no-untyped-def]
+                raise RuntimeError("must not iterate")
+
+        with self.assertRaisesRegex(RuntimeError, "invalid reranker results"):
+            normalize_rerank_results(HostileList([{"paragraph_id": "p1"}]), limit=1)
+        with self.assertRaisesRegex(RuntimeError, "invalid reranker result row"):
+            normalize_rerank_results([{"paragraph_id": "p1"}, object()], limit=2)
+
+        oversized = [{"paragraph_id": str(index)} for index in range(1000)]
+        normalized = normalize_rerank_results(oversized, limit=1)
+
+        self.assertEqual(normalized, [{"paragraph_id": "0"}])
+        self.assertIsNot(normalized[0], oversized[0])
+
+        class HostileOutcome:
+            @property
+            def results(self) -> object:
+                raise RuntimeError("credential-sentinel")
+
+        with self.assertRaisesRegex(RuntimeError, "invalid reranker results container"):
+            normalize_rerank_outcome_results(HostileOutcome(), limit=1)
 
     def test_posts_documented_request_and_maps_score_order_without_mutation(self) -> None:
         session = FakeSession(

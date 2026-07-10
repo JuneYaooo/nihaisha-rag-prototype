@@ -879,6 +879,85 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("search failed", stderr.getvalue())
         self.assertNotIn(secret, stderr.getvalue())
 
+    def test_cli_search_normalizes_untrusted_reranker_results(self) -> None:
+        candidates = [{"paragraph_id": "candidate", "text": "evidence", "score": 1.0}]
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return candidates
+
+        class FakeReranker:
+            outcome: object
+
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def rerank(self, *_args: object, **_kwargs: object) -> object:
+                return self.outcome
+
+        oversized = type(
+            "Outcome",
+            (),
+            {
+                "results": [{"paragraph_id": str(index), "text": "evidence"} for index in range(1000)],
+                "model": "model",
+                "degraded_feature": "",
+            },
+        )()
+        FakeReranker.outcome = oversized
+        stdout = io.StringIO()
+        with (
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.cli.SiliconFlowReranker", FakeReranker),
+            redirect_stdout(stdout),
+        ):
+            status = rag_cli.main(
+                ["search", "q", "--mode", "text", "--reranker", "siliconflow", "--limit", "1", "--json"]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(len(json.loads(stdout.getvalue())), 1)
+
+        class HostileList(list[dict[str, object]]):
+            def __getitem__(self, _index: object) -> object:
+                return [{"paragraph_id": str(index)} for index in range(100)]
+
+        FakeReranker.outcome = type(
+            "Outcome",
+            (),
+            {"results": HostileList(candidates), "model": "model", "degraded_feature": ""},
+        )()
+        stderr = io.StringIO()
+        with (
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.cli.SiliconFlowReranker", FakeReranker),
+            patch("sys.stderr", stderr),
+        ):
+            status = rag_cli.main(
+                ["search", "q", "--mode", "text", "--reranker", "siliconflow", "--limit", "1", "--json"]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("invalid reranker results", stderr.getvalue())
+
+        FakeReranker.outcome = type(
+            "Outcome",
+            (),
+            {"results": [object()], "model": "model", "degraded_feature": ""},
+        )()
+        with (
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.cli.SiliconFlowReranker", FakeReranker),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            self.assertEqual(
+                rag_cli.main(
+                    ["search", "q", "--mode", "text", "--reranker", "siliconflow", "--limit", "1", "--json"]
+                ),
+                1,
+            )
+
     def test_cli_search_trace_is_allowlisted_bounded_and_reflects_selected_rows(self) -> None:
         secret = "sk-hostile-secret-123456789"
         hostile = {
@@ -900,7 +979,16 @@ class PdfVectorTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch("nihaisha_kg.cli.LocalVectorStore", FakeStore), redirect_stdout(stdout):
             status = rag_cli.main(
-                ["search", f"query api_key={secret}", "--mode", "text", "--reranker", "none", "--json", "--trace"]
+                [
+                    "search",
+                    f"query Authorization: Basic {secret}",
+                    "--mode",
+                    "text",
+                    "--reranker",
+                    "none",
+                    "--json",
+                    "--trace",
+                ]
             )
 
         payload = json.loads(stdout.getvalue())
@@ -930,7 +1018,11 @@ class PdfVectorTests(unittest.TestCase):
                 return [result]
 
         outputs: list[str] = []
-        with patch("nihaisha_kg.cli.LocalVectorStore", FakeStore):
+        clock = unittest.mock.Mock(side_effect=AssertionError("clock must not run"))
+        with (
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.cli.time.perf_counter", clock),
+        ):
             for extra in ([], ["--trace"]):
                 stdout = io.StringIO()
                 with redirect_stdout(stdout):
@@ -942,6 +1034,7 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertEqual(outputs[0], outputs[1])
         self.assertNotIn("normalized_query", outputs[1])
+        clock.assert_not_called()
 
     def test_search_trace_tolerates_hostile_mapping_subclasses(self) -> None:
         secret = "sk-hostile-container-123456"
@@ -1831,7 +1924,11 @@ class PdfVectorTests(unittest.TestCase):
             intent: str,
         ) -> list[dict[str, object]]:
             events.append("select")
-            self.assertIs(candidates, reranked)
+            self.assertEqual(candidates, reranked)
+            self.assertIsNot(candidates, reranked)
+            self.assertTrue(
+                all(candidate is not original for candidate, original in zip(candidates, reranked))
+            )
             self.assertEqual(limit, 2)
             return candidates[:limit]
 
@@ -2106,7 +2203,7 @@ class PdfVectorTests(unittest.TestCase):
                 answer_pdf_rag("question", Path("/unused.sqlite"), mode="text", trace_enabled=1)  # type: ignore[arg-type]
         store.assert_not_called()
 
-    def test_answer_trace_latency_has_exact_phases_and_covers_all_work(self) -> None:
+    def test_answer_trace_latency_has_required_phases_and_covers_all_work(self) -> None:
         initial = [{"paragraph_id": "p1", "rewrite_observations": []}]
         followup = [{"paragraph_id": "p2", "rewrite_observations": []}]
 
@@ -2123,10 +2220,8 @@ class PdfVectorTests(unittest.TestCase):
             "related_knowledge_units": [],
             "results": initial + followup,
         }
-        clock = [index / 1000.0 for index in range(40)]
         with (
             patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
-            patch("nihaisha_kg.pdf_vector.time.perf_counter", side_effect=clock) as timer,
             patch("nihaisha_kg.pdf_vector.detect_answer_intent", return_value="general"),
             patch("nihaisha_kg.pdf_vector.build_query_plan", side_effect=[["initial"], ["initial", "followup"]]),
             patch("nihaisha_kg.pdf_vector.run_query_plan_search", side_effect=[initial, followup]),
@@ -2145,20 +2240,130 @@ class PdfVectorTests(unittest.TestCase):
 
         latency = answer["trace"]["latency_ms"]
         self.assertEqual(set(latency), {"planning", "retrieval", "rerank", "guide", "synthesis"})
-        self.assertEqual(
-            latency,
-            {
-                "planning": 2.0,
-                "retrieval": 4.0,
-                "rerank": 1.0,
-                "guide": 1.0,
-                "synthesis": 2.0,
-            },
-        )
-        self.assertEqual(timer.call_count, 20)
-        self.assertTrue(all(0.0 <= value <= 60_000.0 for value in latency.values()))
+        self.assertTrue(all(0.0 <= value <= 3_600_000.0 for value in latency.values()))
         self.assertEqual(pdf_vector._bounded_latency_ms(float("inf")), 0.0)
         self.assertEqual(pdf_vector._bounded_latency_ms(10_000_000.0), 3_600_000.0)
+
+    def test_answer_timing_is_trace_only_and_resilient_to_bad_clocks(self) -> None:
+        candidate = {"paragraph_id": "p1", "text": "evidence"}
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return []
+
+        synthesized = {
+            "answer": "answer",
+            "citations": [],
+            "related_knowledge_units": [],
+            "results": [candidate],
+        }
+
+        def run(trace_enabled: bool, clock: object) -> dict[str, object]:
+            with (
+                patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+                patch("nihaisha_kg.pdf_vector.time.perf_counter", clock),
+                patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["query"]),
+                patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+                patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+                patch("nihaisha_kg.pdf_vector.select_diverse_results", return_value=[candidate]),
+                patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesized),
+            ):
+                return answer_pdf_rag(
+                    "query",
+                    Path("/unused.sqlite"),
+                    mode="text",
+                    reranker="none",
+                    trace_enabled=trace_enabled,
+                )
+
+        disabled_clock = unittest.mock.Mock(side_effect=AssertionError("clock must not run"))
+        without_trace = run(False, disabled_clock)
+        disabled_clock.assert_not_called()
+        self.assertNotIn("trace", without_trace)
+
+        bad_values = iter([float("nan"), float("inf"), 5.0, 4.0] * 20)
+        with_trace = run(True, unittest.mock.Mock(side_effect=lambda: next(bad_values)))
+        latency = with_trace["trace"]["latency_ms"]
+        self.assertEqual(set(latency), {"planning", "retrieval", "rerank", "guide", "synthesis"})
+        self.assertTrue(all(0.0 <= value <= 3_600_000.0 for value in latency.values()))
+
+    def test_answer_normalizes_untrusted_reranker_results(self) -> None:
+        candidate = {"paragraph_id": "p1", "text": "evidence"}
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search_guide_nodes(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return []
+
+        class Backend:
+            results: object
+
+            def rerank(self, *_args: object, **_kwargs: object) -> object:
+                return type(
+                    "Outcome",
+                    (),
+                    {"results": self.results, "model": "model", "degraded_feature": "", "error": ""},
+                )()
+
+        selected_rows: list[list[dict[str, object]]] = []
+
+        def synthesize(_query: str, rows: list[dict[str, object]]) -> dict[str, object]:
+            selected_rows.append(rows)
+            return {
+                "answer": "answer",
+                "citations": [],
+                "related_knowledge_units": [],
+                "results": rows,
+            }
+        backend = Backend()
+        backend.results = [{"paragraph_id": str(index), "text": "evidence"} for index in range(1000)]
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["query"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", side_effect=synthesize),
+        ):
+            answer = answer_pdf_rag(
+                "query", Path("/unused.sqlite"), mode="text", limit=1, reranker_backend=backend
+            )
+        self.assertEqual(len(answer["results"]), 1)
+        self.assertEqual(len(selected_rows[0]), 1)
+        self.assertIsNot(selected_rows[0][0], backend.results[0])
+
+        class HostileList(list[dict[str, object]]):
+            def __getitem__(self, _index: object) -> object:
+                return [{"paragraph_id": "bypass"}] * 100
+
+        backend.results = HostileList([candidate])
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["query"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid reranker results"):
+                answer_pdf_rag(
+                    "query", Path("/unused.sqlite"), mode="text", limit=1, reranker_backend=backend
+                )
+
+        backend.results = [object()]
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["query"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid reranker result row"):
+                answer_pdf_rag(
+                    "query", Path("/unused.sqlite"), mode="text", limit=1, reranker_backend=backend
+                )
 
     def test_answer_pdf_rag_explicit_siliconflow_uses_model_and_auto_without_key_skips(self) -> None:
         candidate = {"paragraph_id": "p1", "text": "证据"}

@@ -4113,6 +4113,31 @@ def _bounded_latency_ms(value: object) -> float:
     return round(max(0.0, min(parsed, TRACE_MAX_LATENCY_MS)), 3)
 
 
+def _trace_phase_start(enabled: bool) -> float | None:
+    if not enabled:
+        return None
+    try:
+        value = float(time.perf_counter())
+    except Exception:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _trace_phase_finish(
+    latency_ms: dict[str, float],
+    phase: str,
+    started: float | None,
+) -> None:
+    if started is None:
+        return
+    try:
+        finished = float(time.perf_counter())
+    except Exception:
+        return
+    elapsed = _bounded_latency_ms((finished - started) * 1000.0)
+    latency_ms[phase] = _bounded_latency_ms(latency_ms[phase] + elapsed)
+
+
 def _trace_dict_get(mapping: dict[str, object], key: str, default: object = None) -> object:
     try:
         return dict.get(mapping, key, default)
@@ -4222,11 +4247,11 @@ def answer_pdf_rag(
         )
         store = LocalVectorStore(db_path, embedding_backend=backend)
     candidate_limit = max(limit * 4, 16)
-    phase_started = time.perf_counter()
+    phase_started = _trace_phase_start(trace_enabled)
     intent = detect_answer_intent(query)
     initial_plan = build_query_plan(query, intent=intent)
-    latency_ms["planning"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+    _trace_phase_finish(latency_ms, "planning", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     results = run_query_plan_search(
         store,
         initial_plan,
@@ -4235,17 +4260,17 @@ def answer_pdf_rag(
         intent=intent,
     )
     initial_results = results
-    latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+    _trace_phase_finish(latency_ms, "retrieval", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     followup_plan = [
         planned_query
         for planned_query in build_query_plan(query, intent=intent, seed_results=results)
         if planned_query not in initial_plan
     ]
-    latency_ms["planning"] += (time.perf_counter() - phase_started) * 1000.0
+    _trace_phase_finish(latency_ms, "planning", phase_started)
     followup_results: list[dict[str, object]] = []
     if followup_plan:
-        phase_started = time.perf_counter()
+        phase_started = _trace_phase_start(trace_enabled)
         followup_results = run_query_plan_search(
             store,
             followup_plan,
@@ -4254,13 +4279,13 @@ def answer_pdf_rag(
             intent=intent,
         )
         results = fuse_query_rewrites([results, followup_results], limit=max(candidate_limit * 2, 32))
-        latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+        _trace_phase_finish(latency_ms, "retrieval", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     intent_results = filter_results_for_intent(query, intent, results)
-    latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
+    _trace_phase_finish(latency_ms, "retrieval", phase_started)
     rerank_outcome = None
     rerank_limit = min(len(intent_results), max(limit * 3, 12))
-    phase_started = time.perf_counter()
+    phase_started = _trace_phase_start(trace_enabled)
     if reranker_backend is not None:
         rerank_outcome = reranker_backend.rerank(query, intent_results, limit=rerank_limit)
     elif reranker == "siliconflow" or (
@@ -4274,12 +4299,17 @@ def answer_pdf_rag(
             limit=rerank_limit,
         )
     if rerank_outcome is not None:
-        intent_results = rerank_outcome.results
-    latency_ms["rerank"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+        from .rerank import normalize_rerank_outcome_results
+
+        intent_results = normalize_rerank_outcome_results(
+            rerank_outcome,
+            limit=rerank_limit,
+        )
+    _trace_phase_finish(latency_ms, "rerank", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
-    latency_ms["retrieval"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+    _trace_phase_finish(latency_ms, "retrieval", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     answer = synthesize_pdf_rag_answer(query, results)
     if rerank_outcome is not None:
         from .rerank import (
@@ -4315,11 +4345,11 @@ def answer_pdf_rag(
             for unit in answer.get("related_knowledge_units", []) or []
         ),
     ]
-    latency_ms["synthesis"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+    _trace_phase_finish(latency_ms, "synthesis", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     related_guide_nodes = store.search_guide_nodes(" ".join(guide_query_parts), limit=8)
-    latency_ms["guide"] += (time.perf_counter() - phase_started) * 1000.0
-    phase_started = time.perf_counter()
+    _trace_phase_finish(latency_ms, "guide", phase_started)
+    phase_started = _trace_phase_start(trace_enabled)
     answer["related_guide_nodes"] = related_guide_nodes
     answer["differentiation_flow"] = build_differentiation_flow(query, related_guide_nodes)
     answer["followup_questions"] = build_followup_questions(
@@ -4328,7 +4358,7 @@ def answer_pdf_rag(
         related_guide_nodes,
         list(answer.get("related_knowledge_units", []) or []),
     )
-    latency_ms["synthesis"] += (time.perf_counter() - phase_started) * 1000.0
+    _trace_phase_finish(latency_ms, "synthesis", phase_started)
     if trace_enabled:
         from .rerank import (
             PUBLIC_RERANK_FEATURE_MAX_CHARS,
