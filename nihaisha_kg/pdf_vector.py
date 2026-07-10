@@ -3307,12 +3307,27 @@ def anchor_evidence_snippet(text: str, anchors: list[str], max_chars: int = 220)
             end = min(len(text), start + max_chars)
             start = max(0, end - max_chars)
             return text[start:end].strip()
-    snippets = [
-        evidence_quote(text[max(0, offset - 20) : offset + len(anchor) + 20], max_chars=48)
-        for offset, anchor in zip(offsets, anchors)
-        if offset >= 0
-    ]
-    return " … ".join(snippets)[:max_chars]
+    present = dedupe_keep_order(
+        anchor for offset, anchor in zip(offsets, anchors) if offset >= 0
+    )
+    separator = " … "
+    minimum = sum(len(anchor) for anchor in present) + len(separator) * max(0, len(present) - 1)
+    if not present:
+        return ""
+    if minimum > max_chars:
+        raise ValueError("source anchor names exceed citation excerpt budget")
+    remaining = max_chars - minimum
+    shared_context, extra = divmod(remaining, len(present))
+    snippets: list[str] = []
+    for index, anchor in enumerate(present):
+        budget = len(anchor) + shared_context + (1 if index < extra else 0)
+        offset = text.find(anchor)
+        context = budget - len(anchor)
+        start = max(0, offset - context // 2)
+        end = min(len(text), start + budget)
+        start = max(0, end - budget)
+        snippets.append(text[start:end].strip())
+    return separator.join(snippets)
 
 
 def citation_evidence_for_result(

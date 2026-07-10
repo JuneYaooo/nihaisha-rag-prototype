@@ -294,6 +294,18 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertIn("桂枝汤", excerpt)
         self.assertLessEqual(len(excerpt), 220)
 
+    def test_source_citation_budget_retains_all_distant_query_anchors(self) -> None:
+        formulas = ("桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤")
+        paragraph = ("背景说明" * 40).join(formulas)
+        query = "、".join(formulas) + "出处"
+
+        answer = pdf_vector.synthesize_pdf_rag_answer(query, [result(paragraph)])
+        excerpt = answer["citations"][0]["evidence_quote"]
+
+        self.assertLessEqual(len(excerpt), 220)
+        for formula in formulas:
+            self.assertIn(formula, excerpt)
+
     def test_generic_source_query_uses_formula_safety_from_evidence_prose(self) -> None:
         answer = pdf_vector.synthesize_pdf_rag_answer(
             "这种方的原文",
