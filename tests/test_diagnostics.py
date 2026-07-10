@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import tempfile
 import unittest
@@ -11,6 +10,7 @@ from unittest.mock import patch
 
 from nihaisha_kg import diagnostics
 from nihaisha_kg.diagnostics import doctor
+from nihaisha_kg.faiss_artifacts import resolve_faiss_artifacts
 from nihaisha_kg.pdf_vector import DenseEmbeddingBackend, LocalVectorStore, RetrievalUnit
 
 
@@ -236,39 +236,28 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
 
-    def test_doctor_honors_legacy_cwd_relative_paths_written_by_builder(self) -> None:
-        class Index:
-            ntotal = 1
-            d = 2
-
-        class FakeFaiss:
-            def read_index(self, path: str) -> Index:
-                return Index()
-
+    def test_artifact_resolution_never_probes_cwd_relative_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
-            store_dir = base / "store"
-            store_dir.mkdir()
-            db_path = self._create_dense_store(store_dir)
-            (store_dir / "vectors.faiss").write_bytes(b"index")
-            (store_dir / "vector_ids.jsonl").write_text('{"unit_id": "u1"}\n', encoding="utf-8")
-            with closing(sqlite3.connect(db_path)) as conn:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-                    (
-                        ("faiss_index", "store/vectors.faiss"),
-                        ("faiss_ids", "store/vector_ids.jsonl"),
-                    ),
-                )
-                conn.commit()
-            previous_cwd = Path.cwd()
-            try:
-                os.chdir(base)
-                report = doctor(db_path, faiss_loader=lambda: FakeFaiss())
-            finally:
-                os.chdir(previous_cwd)
+            db_path = base / "store" / "rag.sqlite"
+            relative_index = Path("legacy/custom.faiss")
+            relative_ids = Path("legacy/custom.jsonl")
 
-        self.assertEqual(report["status"], "ok")
+            with patch.object(
+                Path,
+                "exists",
+                autospec=True,
+                side_effect=lambda path: path in {relative_index, relative_ids},
+            ) as exists:
+                artifacts = resolve_faiss_artifacts(
+                    db_path,
+                    str(relative_index),
+                    str(relative_ids),
+                )
+
+        self.assertEqual(artifacts.index, db_path.parent / relative_index)
+        self.assertEqual(artifacts.ids, db_path.parent / relative_ids)
+        self.assertTrue(all(call.args[0].is_absolute() for call in exists.call_args_list))
 
     def test_doctor_prefers_sibling_artifacts_without_cwd_dependency(self) -> None:
         class Index:

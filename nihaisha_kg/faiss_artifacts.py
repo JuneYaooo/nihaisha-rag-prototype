@@ -31,9 +31,6 @@ def _resolve_artifact(
         return db_relative
     if sibling.exists():
         return sibling
-    # Last-resort compatibility for old metadata written relative to the build cwd.
-    if candidate.exists():
-        return candidate.resolve()
     return db_relative
 
 

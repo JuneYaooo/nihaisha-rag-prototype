@@ -255,6 +255,7 @@ FORMULA_RIGHT_QUERY_SUFFIXES = (
     "的出处", "出处", "原文", "哪本书", "哪一页", "方证", "主治", "对应",
     "如何", "鉴别", "比较", "区别", "和", "与", "、",
 )
+MAX_RUNTIME_META_VALUE_CHARS = 4096
 NAMED_RIGHT_QUERY_SUFFIXES = (
     *FORMULA_RIGHT_QUERY_SUFFIXES, "的原文", "热熨法", "是", "多少", "几克", "换算"
 )
@@ -1583,6 +1584,44 @@ class LocalVectorStore:
             except sqlite3.OperationalError:
                 return {}
 
+    @staticmethod
+    def _read_meta_keys_from_connection(
+        conn: sqlite3.Connection,
+        keys: tuple[str, ...],
+    ) -> dict[str, str]:
+        placeholders = ",".join("?" for _ in keys)
+        query = f"""SELECT key, typeof(value), length(value),
+            CASE WHEN typeof(value) = 'text' AND length(value) <= ?
+                 THEN value ELSE NULL END
+            FROM meta WHERE key IN ({placeholders})"""
+        metadata: dict[str, str] = {}
+        try:
+            for key, value_type, value_length, safe_value in conn.execute(
+                query,
+                (MAX_RUNTIME_META_VALUE_CHARS, *keys),
+            ):
+                if (
+                    not isinstance(key, str)
+                    or key in metadata
+                    or value_type != "text"
+                    or not isinstance(value_length, int)
+                    or value_length > MAX_RUNTIME_META_VALUE_CHARS
+                    or not isinstance(safe_value, str)
+                ):
+                    raise RuntimeError("database metadata is invalid")
+                metadata[key] = safe_value
+        except sqlite3.OperationalError:
+            return {}
+        except (MemoryError, OverflowError, sqlite3.DatabaseError, TypeError, ValueError):
+            raise RuntimeError("database metadata is invalid") from None
+        return metadata
+
+    def read_meta_keys(self, keys: tuple[str, ...]) -> dict[str, str]:
+        if not keys or not self.db_path.exists():
+            return {}
+        with self.connect() as conn:
+            return self._read_meta_keys_from_connection(conn, keys)
+
     def recreate(self) -> None:
         if self.db_path.exists():
             self.db_path.unlink()
@@ -2332,7 +2371,7 @@ class LocalVectorStore:
         faiss_module: object | None = None,
     ) -> list[dict[str, object]]:
         vector_kind = self.embedding_backend.vector_kind
-        stored_vector_kind = self.read_meta().get("vector_kind")
+        stored_vector_kind = self.read_meta_keys(("vector_kind",)).get("vector_kind")
         if stored_vector_kind and stored_vector_kind != vector_kind:
             raise RuntimeError(
                 "vector_kind mismatch: "
@@ -2395,14 +2434,10 @@ class LocalVectorStore:
         faiss_module: object | None = None,
     ) -> list[dict[str, object]] | None:
         try:
-            meta_rows = conn.execute(
-                "SELECT key, value FROM meta WHERE key IN ('faiss_index', 'faiss_ids')"
+            artifact_meta = self._read_meta_keys_from_connection(
+                conn,
+                ("faiss_index", "faiss_ids"),
             )
-            artifact_meta = {
-                str(row[0]): row[1]
-                for row in meta_rows
-                if isinstance(row[1], str)
-            }
             artifacts = resolve_faiss_artifacts(
                 self.db_path,
                 artifact_meta.get("faiss_index"),

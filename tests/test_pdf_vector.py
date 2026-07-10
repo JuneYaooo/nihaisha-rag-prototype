@@ -210,6 +210,46 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertEqual(results[0]["retrieval_sources"], ["faiss"])
 
+    def test_vector_search_uses_bounded_metadata_reader(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(build_retrieval_units([paragraph], window_size=2, overlap=1))
+            with store.connect() as conn:
+                conn.execute("INSERT INTO meta(key, value) VALUES ('unrelated', zeroblob(5000000))")
+
+            with patch.object(store, "read_meta", side_effect=AssertionError("full metadata read")):
+                results = store.search_vector("桂枝汤")
+
+        self.assertEqual(results[0]["paragraph_id"], "p-a")
+
+    def test_vector_search_rejects_hostile_recognized_metadata_with_bounded_message(self) -> None:
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(
+                Path(tmpdir) / "rag.sqlite",
+                embedding_backend=ToyDenseBackend(),
+            )
+            store.recreate()
+            with store.connect() as conn:
+                conn.execute("UPDATE meta SET value = zeroblob(10000) WHERE key = 'vector_kind'")
+
+            with self.assertRaises(RuntimeError) as raised:
+                store.search_vector("桂枝汤")
+
+        self.assertIn("metadata", str(raised.exception).lower())
+        self.assertLess(len(str(raised.exception)), 200)
+
     def test_runtime_mapping_loader_streams_without_path_read_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ids_path = Path(tmpdir) / "ids.jsonl"
