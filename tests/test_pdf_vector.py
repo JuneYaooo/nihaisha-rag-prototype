@@ -308,6 +308,53 @@ class PdfVectorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "^database metadata is invalid$"):
                 store.read_meta_keys(("vector_kind",))
 
+    def test_uppercase_meta_table_preserves_vector_kind_mismatch_guard(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(build_retrieval_units([paragraph], window_size=2, overlap=1))
+            with store.connect() as conn:
+                conn.executescript(
+                    """
+                    ALTER TABLE meta RENAME TO old_meta;
+                    CREATE TABLE META(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO META SELECT key, value FROM old_meta;
+                    DROP TABLE old_meta;
+                    """
+                )
+
+            mismatched = LocalVectorStore(db_path, embedding_backend=ToyDenseBackend())
+            with self.assertRaisesRegex(RuntimeError, "vector_kind mismatch"):
+                mismatched.search_vector("桂枝汤")
+
+    def test_bounded_metadata_reader_rejects_uppercase_meta_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            with store.connect() as conn:
+                conn.executescript(
+                    """
+                    ALTER TABLE meta RENAME TO backing_meta;
+                    CREATE VIEW META AS SELECT key, value FROM backing_meta;
+                    """
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "^database metadata is invalid$"):
+                store.read_meta_keys(("vector_kind",))
+
     def test_runtime_mapping_loader_streams_without_path_read_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ids_path = Path(tmpdir) / "ids.jsonl"

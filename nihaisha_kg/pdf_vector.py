@@ -1590,12 +1590,14 @@ class LocalVectorStore:
         keys: tuple[str, ...],
     ) -> dict[str, str]:
         try:
-            meta_object = conn.execute(
-                "SELECT type FROM sqlite_master WHERE name = 'meta'"
-            ).fetchone()
+            meta_objects = conn.execute(
+                "SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE",
+                ("meta",),
+            )
+            meta_object = meta_objects.fetchone()
             if meta_object is None:
                 return {}
-            if meta_object[0] != "table":
+            if meta_objects.fetchone() is not None or meta_object[0] != "table":
                 raise RuntimeError("database metadata is invalid")
             placeholders = ",".join("?" for _ in keys)
             query = f"""SELECT key, typeof(value), length(CAST(value AS BLOB)),
