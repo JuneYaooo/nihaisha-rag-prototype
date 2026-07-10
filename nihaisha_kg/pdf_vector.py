@@ -14,12 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .normalization import lexical_query_terms, normalize_query_text
+
 
 SENTENCE_RE = re.compile(r"[^。！？!?；;]+[。！？!?；;]?")
 ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_+-]{2,}")
 CHINESE_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
 TERM_SPLIT_RE = re.compile(r"[，,。！？!?；;、\s]+")
-QUERY_TERM_RE = re.compile(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}")
 MEASURE_TERM_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:克|钱|兩|两|分|升|斗|斤|铢)")
 FORMULA_SUFFIXES = ("汤", "丸", "散", "饮", "膏", "丹")
 FORMULA_MAX_CHARS = 8
@@ -458,28 +459,35 @@ def extract_known_terms(text: str, terms: Iterable[str]) -> list[str]:
     return [term for term in terms if term in text]
 
 
-def text_search_terms(query: str) -> list[str]:
-    terms = QUERY_TERM_RE.findall(query)
-    terms.extend(term.replace(" ", "") for term in MEASURE_TERM_RE.findall(query))
-    return dedupe_keep_order(terms)
-
-
-def knowledge_search_terms(query: str) -> list[str]:
-    domain_terms = [
+def query_domain_terms(query: str) -> list[str]:
+    normalized = normalize_query_text(query)
+    fixed_terms = (
         "一钱",
         "黄金比例",
         "木香饼",
         "热熨",
         "主之",
         "方证",
-        "禁忌",
-        "误用",
+        "鉴别",
+        "出处",
+        "太阳病",
+        "欲解",
         *SYMPTOM_TERMS,
         *SIX_CHANNEL_TERMS,
-    ]
+    )
+    terms = extract_formula_terms(normalized)
+    terms.extend(term for term in fixed_terms if term in normalized)
+    return dedupe_keep_order(terms)
+
+
+def text_search_terms(query: str) -> list[str]:
+    return lexical_query_terms(query, domain_terms=query_domain_terms(query))
+
+
+def knowledge_search_terms(query: str) -> list[str]:
     terms = text_search_terms(query)
-    terms.extend(term for term in domain_terms if term in query)
-    terms.extend(extract_formula_terms(query))
+    normalized = normalize_query_text(query)
+    terms.extend(term for term in ("禁忌", "误用", "比较", "区别") if term in normalized)
     return dedupe_keep_order(terms)
 
 
@@ -2598,36 +2606,6 @@ class LocalVectorStore:
         if mode == "hybrid":
             return self.search_hybrid(query, limit=limit, unit_limit=unit_limit)
         raise ValueError(f"unsupported search mode: {mode}")
-
-
-TRADITIONAL_QUERY_TRANSLATION = str.maketrans(
-    {
-        "錢": "钱",
-        "現": "现",
-        "餅": "饼",
-        "熱": "热",
-        "來": "来",
-        "發": "发",
-        "燒": "烧",
-        "噁": "恶",
-        "歲": "岁",
-        "頭": "头",
-        "頸": "颈",
-        "痠": "酸",
-        "黃": "黄",
-        "開": "开",
-        "藥": "药",
-        "處": "处",
-        "瀉": "泻",
-        "證": "证",
-        "裡": "里",
-        "裡": "里",
-    }
-)
-
-
-def normalize_query_text(query: str) -> str:
-    return query.translate(TRADITIONAL_QUERY_TRANSLATION)
 
 
 def detect_answer_intent(query: str) -> str:
