@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from nihaisha_kg import normalization as query_normalization
 from nihaisha_kg.normalization import lexical_query_terms, normalize_query_text
 
 
@@ -184,6 +185,28 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(len(first), 8)
         self.assertEqual(first, second)
         self.assertEqual(first[:4], ["太阳病", "太陽病", "token0000", "token0001"])
+
+    def test_reverse_equivalence_retains_all_traditional_forms_for_li(self) -> None:
+        self.assertEqual(
+            query_normalization._SIMPLIFIED_TO_TRADITIONAL_EQUIVALENTS["里"],
+            ("裡", "裏"),
+        )
+
+    def test_term_variants_include_both_traditional_li_forms(self) -> None:
+        terms = lexical_query_terms("经方里面辨证")
+
+        self.assertEqual(
+            terms,
+            ["经方里面辨证", "經方裡面辨證", "經方裏面辨證"],
+        )
+
+    def test_term_variant_expansion_is_deterministic_and_bounded(self) -> None:
+        first = lexical_query_terms("里里里里", domain_terms=("里里里里",))
+        second = lexical_query_terms("里里里里", domain_terms=("里里里里",))
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), query_normalization.MAX_TERM_VARIANTS)
+        self.assertEqual(first[0], "里里里里")
 
 
 if __name__ == "__main__":

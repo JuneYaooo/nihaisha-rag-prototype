@@ -1283,6 +1283,32 @@ class PdfVectorTests(unittest.TestCase):
         self.assertTrue(results)
         self.assertEqual(results[0]["paragraph_id"], "p-simplified-cold-limbs")
 
+    def test_simplified_query_retrieves_each_traditional_li_form(self) -> None:
+        cases = (
+            ("裡", "p-traditional-inner"),
+            ("裏", "p-traditional-alternate"),
+        )
+
+        for traditional_li, paragraph_id in cases:
+            with self.subTest(traditional_li=traditional_li), tempfile.TemporaryDirectory() as tmpdir:
+                paragraph = ParsedParagraph(
+                    paragraph_id=paragraph_id,
+                    doc_id="doc",
+                    source_path=f"/tmp/{paragraph_id}.pdf",
+                    title=f"經方{traditional_li}面辨證",
+                    page_start=1,
+                    page_end=1,
+                    text=f"經方{traditional_li}面辨證須依原文。",
+                )
+                store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+                store.recreate()
+                store.insert_paragraphs([paragraph])
+
+                results = store.search_text("经方里面辨证", limit=2)
+
+                self.assertTrue(results)
+                self.assertEqual(results[0]["paragraph_id"], paragraph_id)
+
     def test_hybrid_search_combines_vector_and_text_sources(self) -> None:
         paragraph_a = ParsedParagraph(
             paragraph_id="p-a",

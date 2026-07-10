@@ -72,9 +72,17 @@ _TRADITIONAL_TO_SIMPLIFIED = {
 }
 
 TRADITIONAL_QUERY_TRANSLATION = str.maketrans(_TRADITIONAL_TO_SIMPLIFIED)
-_SIMPLIFIED_QUERY_TRANSLATION = str.maketrans(
-    {simplified: traditional for traditional, simplified in _TRADITIONAL_TO_SIMPLIFIED.items()}
-)
+
+
+def _build_simplified_to_traditional_equivalents() -> dict[str, tuple[str, ...]]:
+    equivalents: dict[str, list[str]] = {}
+    for traditional, simplified in _TRADITIONAL_TO_SIMPLIFIED.items():
+        equivalents.setdefault(simplified, []).append(traditional)
+    return {simplified: tuple(values) for simplified, values in equivalents.items()}
+
+
+_SIMPLIFIED_TO_TRADITIONAL_EQUIVALENTS = _build_simplified_to_traditional_equivalents()
+MAX_TERM_VARIANTS = 8
 
 CHINESE_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 ASCII_TERM_RE = re.compile(r"[A-Za-z0-9_+.-]{2,}")
@@ -122,8 +130,20 @@ def normalize_query_text(query: str) -> str:
     return query.translate(TRADITIONAL_QUERY_TRANSLATION)
 
 
-def _traditional_query_text(query: str) -> str:
-    return query.translate(_SIMPLIFIED_QUERY_TRANSLATION)
+def _traditional_query_variants(query: str) -> list[str]:
+    variants = [""]
+    for character in query:
+        equivalents = _SIMPLIFIED_TO_TRADITIONAL_EQUIVALENTS.get(character, (character,))
+        expanded: list[str] = []
+        for prefix in variants:
+            for equivalent in equivalents:
+                expanded.append(prefix + equivalent)
+                if len(expanded) >= MAX_TERM_VARIANTS:
+                    break
+            if len(expanded) >= MAX_TERM_VARIANTS:
+                break
+        variants = expanded
+    return variants
 
 
 def _dedupe_keep_order(values: Iterable[str]) -> list[str]:
@@ -182,10 +202,11 @@ def _replace_spans_with_boundaries(text: str, spans: Iterable[tuple[int, int]]) 
     return re.sub(r"\s+", " ", "".join(characters)).strip()
 
 
-def _term_variants(normalized_term: str, surface_term: str) -> list[str]:
-    return _dedupe_keep_order(
-        [normalized_term, surface_term, _traditional_query_text(normalized_term)]
+def _term_variants(normalized_term: str, *surface_terms: str) -> list[str]:
+    variants = _dedupe_keep_order(
+        [normalized_term, *surface_terms, *_traditional_query_variants(normalized_term)]
     )
+    return variants[:MAX_TERM_VARIANTS]
 
 
 def _contains_generic_fragment(term: str) -> bool:
@@ -208,8 +229,7 @@ def lexical_query_terms(
     recognized_variants: list[str] = []
     for term in recognized:
         surfaces = [query[start:end] for start, end in recognized_spans[term]]
-        surfaces.append(_traditional_query_text(term))
-        recognized_variants.extend(surface for surface in surfaces if surface != term)
+        recognized_variants.extend(_term_variants(term, *surfaces)[1:])
 
     measure_matches = list(MEASURE_RE.finditer(normalized))
     measure_terms = [re.sub(r"\s+", "", match.group(0)) for match in measure_matches]

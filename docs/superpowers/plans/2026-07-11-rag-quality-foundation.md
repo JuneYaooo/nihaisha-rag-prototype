@@ -298,6 +298,8 @@ Also verify:
 - every traditional character used by scaffold, generic-fragment, and trailing-particle vocabulary
   normalizes completely.
 - more than 1,000 ASCII tokens produce at most `max_terms`, with domain/script anchors first.
+- reverse equivalences retain every ordered traditional form for a simplified character; in particular,
+  `经方里面辨证` emits both `經方裡面辨證` and `經方裏面辨證`, with at most eight variants per term.
 - `text_search_terms` and `knowledge_search_terms` expose the same boundary-preserving behavior.
 - a real temporary `LocalVectorStore` retrieves a traditional-only `太陽病/脈證` paragraph from a simplified query and a simplified-only `少阴病/脉证` paragraph from a traditional query.
 - live SQLite text search handles more than 1,000 ASCII query tokens without `OperationalError`, and
@@ -331,9 +333,15 @@ _TRADITIONAL_TO_SIMPLIFIED = {
     "資": "资", "內": "内", "嗎": "吗", "裏": "里",
 }
 TRADITIONAL_QUERY_TRANSLATION = str.maketrans(_TRADITIONAL_TO_SIMPLIFIED)
-_SIMPLIFIED_QUERY_TRANSLATION = str.maketrans(
-    {simplified: traditional for traditional, simplified in _TRADITIONAL_TO_SIMPLIFIED.items()}
-)
+
+def build_simplified_to_traditional_equivalents() -> dict[str, tuple[str, ...]]:
+    equivalents: dict[str, list[str]] = {}
+    for traditional, simplified in _TRADITIONAL_TO_SIMPLIFIED.items():
+        equivalents.setdefault(simplified, []).append(traditional)
+    return {simplified: tuple(values) for simplified, values in equivalents.items()}
+
+SIMPLIFIED_TO_TRADITIONAL_EQUIVALENTS = build_simplified_to_traditional_equivalents()
+MAX_TERM_VARIANTS = 8
 
 QUESTION_SCAFFOLD = (
     "从什么时候到什么时候", "什么时候", "是什么", "有哪些", "如何", "怎么",
@@ -348,8 +356,8 @@ The implementation must then:
 1. normalize the query character-for-character but retain the original query at identical offsets;
 2. sort domain candidates longest-first, select occurrence spans, and emit a shorter candidate only if
    at least one occurrence is outside spans already claimed by longer candidates;
-3. emit normalized recognized terms first, followed by original-surface and deterministic traditional
-   variants, with stable order-preserving deduplication;
+3. emit normalized recognized terms first, followed by original-surface and every ordered traditional
+   equivalent, using bounded Cartesian expansion (`MAX_TERM_VARIANTS=8`) and stable deduplication;
 4. replace recognized, measure, ASCII, full question-phrase, and generic-fragment spans with whitespace
    boundaries in both aligned query variants, then normalize whitespace;
 5. never globally delete `和/与/从/到/的`; only trim trailing `的/了/呢/吗` from a standalone fallback;
@@ -399,7 +407,7 @@ Remove the old `TRADITIONAL_QUERY_TRANSLATION` constant and local `normalize_que
 Run:
 
 ```bash
-python3 -m unittest tests.test_normalization tests.test_pdf_vector.PdfVectorTests.test_search_term_apis_delegate_to_boundary_preserving_normalization tests.test_pdf_vector.PdfVectorTests.test_text_search_retrieves_across_traditional_and_simplified_scripts tests.test_pdf_vector.PdfVectorTests.test_text_search_bounds_large_ascii_query_without_sqlite_error tests.test_pdf_vector.PdfVectorTests.test_traditional_question_scaffold_retrieves_simplified_paragraph tests.test_pdf_vector.PdfVectorTests.test_text_search_returns_exact_original_paragraph_without_embedding -v
+python3 -m unittest tests.test_normalization tests.test_pdf_vector.PdfVectorTests.test_search_term_apis_delegate_to_boundary_preserving_normalization tests.test_pdf_vector.PdfVectorTests.test_text_search_retrieves_across_traditional_and_simplified_scripts tests.test_pdf_vector.PdfVectorTests.test_text_search_bounds_large_ascii_query_without_sqlite_error tests.test_pdf_vector.PdfVectorTests.test_traditional_question_scaffold_retrieves_simplified_paragraph tests.test_pdf_vector.PdfVectorTests.test_simplified_query_retrieves_each_traditional_li_form tests.test_pdf_vector.PdfVectorTests.test_text_search_returns_exact_original_paragraph_without_embedding -v
 ```
 
 Expected: all selected helper, delegation, cross-script SQLite retrieval, and compatibility tests pass.
@@ -408,7 +416,7 @@ Expected: all selected helper, delegation, cross-script SQLite retrieval, and co
 
 ```bash
 git add nihaisha_kg/normalization.py nihaisha_kg/pdf_vector.py tests/test_normalization.py tests/test_pdf_vector.py
-git commit -m "fix: bound multilingual lexical queries"
+git commit -m "fix: retain all traditional query variants"
 ```
 
 ## Task 3: Remove Hard-Coded Answer Content
