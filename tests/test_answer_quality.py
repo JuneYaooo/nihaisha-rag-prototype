@@ -72,6 +72,33 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertNotIn("出处", anchors)
         self.assertNotIn("哪本书", anchors)
 
+    def test_reliable_source_anchors_exclude_generic_reference_phrases(self) -> None:
+        query = "这种治法的原文在哪一段？"
+        evidence = result("老师说明此法用于课程示例。")
+
+        self.assertEqual(pdf_vector.reliable_source_anchors(query), [])
+        self.assertEqual(
+            pdf_vector.filter_results_for_intent(query, "source_lookup", [evidence]),
+            [evidence],
+        )
+
+    def test_source_anchors_do_not_create_cross_boundary_symptom_terms(self) -> None:
+        query = "咳嗽怕冷无汗出处"
+
+        self.assertNotIn("汗出", pdf_vector.answer_anchor_terms(query))
+        self.assertEqual(pdf_vector.reliable_source_anchors(query), [])
+
+    def test_reliable_source_anchors_keep_explicit_named_entities(self) -> None:
+        cases = {
+            "桂枝汤出处": ["桂枝汤"],
+            "木香饼热熨法原文": ["木香饼"],
+            "一钱的原文": ["一钱"],
+            "太阳病原文": ["太阳病"],
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_source_anchors(query), expected)
+
     def test_source_filter_requires_primary_anchor_when_direct_evidence_exists(self) -> None:
         generic = result("用火温之，再以热熨法处理。", paragraph_id="p-generic")
         direct = result("木香饼（生地木香作饼），热熨贴之。", paragraph_id="p-direct")
@@ -117,6 +144,29 @@ class AnswerQualityTests(unittest.TestCase):
         )
 
         self.assertEqual(questions, [])
+
+    def test_followups_do_not_add_absent_differentiation_or_safety_facts(self) -> None:
+        questions = pdf_vector.build_followup_questions(
+            "患者下利",
+            "clinical",
+            [],
+            [{"subject": "某汤", "predicate": "主治", "object": "下利", "evidence_quote": "下利，某汤主之。"}],
+        )
+        joined = "\n".join(questions)
+
+        self.assertIn("下利", joined)
+        for absent in ("黄臭", "寒利", "完谷不化", "腹痛", "妊娠", "附子", "峻下"):
+            self.assertNotIn(absent, joined)
+
+    def test_followups_can_derive_a_question_from_guide_node_label(self) -> None:
+        questions = pdf_vector.build_followup_questions(
+            "患者情况待核对",
+            "clinical",
+            [{"label": "麻黄汤", "content": "", "path": "方证 > 麻黄汤"}],
+            [],
+        )
+
+        self.assertTrue(any("麻黄汤" in question for question in questions))
 
 
 if __name__ == "__main__":

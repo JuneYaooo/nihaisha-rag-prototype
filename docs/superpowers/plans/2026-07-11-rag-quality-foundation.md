@@ -510,6 +510,20 @@ def answer_anchor_terms(query: str) -> list[str]:
     return [term for term in terms if term not in generic][:6]
 
 
+def reliable_source_anchors(query: str) -> list[str]:
+    """Return only explicit formula names and allowlisted distinctive named entities.
+
+    Unlike display-oriented answer_anchor_terms, this list is safe to use as a
+    hard evidence filter. Generic references, symptoms, and fallback phrases
+    must never enter it.
+    """
+    normalized = normalize_query_text(query)
+    named_terms = ("木香饼", "一钱", "太阳病", "黄金比例")
+    return dedupe_keep_order(
+        [*extract_formula_terms(normalized), *(term for term in named_terms if term in normalized)]
+    )[:8]
+
+
 def detect_answer_intent(query: str) -> str:
     normalized = normalize_query_text(query)
     if "一钱" in normalized and any(marker in normalized for marker in ("克", "多少", "几")):
@@ -564,7 +578,7 @@ Replace the `clinical` branch with:
         )
 ```
 
-Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, identify the most-specific primary anchor (formula names first; otherwise the first reliable named anchor, with generic `热熨` secondary to `木香饼`) and require its direct occurrence in `result_evidence_text(result)`. If no reliable anchor exists, do not over-filter. Include only actual citation locations and excerpts in the synthesized source answer. Update `build_followup_questions` to derive questions only from query clues, retrieved guide nodes, and related knowledge units; if none supplies a differentiated clue, return an empty list rather than a generic or diarrhea-specific checklist.
+Keep display topic extraction (`answer_anchor_terms`) separate from hard-filter anchors (`reliable_source_anchors`). Display terms must occur directly in the normalized query and must avoid cross-boundary manufactured terms; reliable anchors are limited to explicit formula names and a small allowlist of distinctive named entities. Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, require every reliable anchor to occur directly in `result_evidence_text(result)`; if no reliable anchor exists, do not over-filter. Include only actual citation locations and excerpts in the synthesized source answer. `build_followup_questions` may use only actual query clues and explicit guide-node or knowledge-unit fields, wrapping derived items in a neutral question. It must not contain fixed diagnostic, differentiation, or medication-risk templates; if no item is derivable, return an empty list.
 
 - [ ] **Step 4: Delete dead fixed query expansion**
 

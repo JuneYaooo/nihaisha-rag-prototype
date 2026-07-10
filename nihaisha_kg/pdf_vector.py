@@ -228,6 +228,7 @@ ANSWER_ANCHOR_EXCLUDED_TERMS = {
     "课程",
     "相关线索",
 }
+RELIABLE_SOURCE_NAMED_TERMS = ("木香饼", "一钱", "太阳病", "黄金比例")
 
 
 @dataclass(frozen=True)
@@ -2658,11 +2659,30 @@ def detect_answer_intent(query: str) -> str:
     return "general"
 
 
+def direct_present_terms(text: str, terms: Iterable[str]) -> list[str]:
+    normalized = normalize_query_text(text)
+    occurrences: list[tuple[int, int, str]] = []
+    for term in dedupe_keep_order(normalize_query_text(term) for term in terms):
+        offset = normalized.find(term)
+        while term and offset >= 0:
+            occurrences.append((offset, offset + len(term), term))
+            offset = normalized.find(term, offset + 1)
+    selected: list[tuple[int, int, str]] = []
+    for start, end, term in sorted(occurrences, key=lambda item: (item[0], -(item[1] - item[0]))):
+        if any(start < kept_end and end > kept_start for kept_start, kept_end, _ in selected):
+            continue
+        selected.append((start, end, term))
+    return dedupe_keep_order(term for _, _, term in selected)
+
+
 def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
     normalized = normalize_query_text(query)
-    formulas = extract_formula_terms(normalized)
-    domain_terms = query_domain_terms(normalized)
-    lexical_terms = [term for term in text_search_terms(normalized) if term in normalized]
+    topic_text = normalized
+    for generic in sorted(ANSWER_ANCHOR_EXCLUDED_TERMS, key=len, reverse=True):
+        topic_text = topic_text.replace(generic, " ")
+    formulas = extract_formula_terms(topic_text)
+    domain_terms = direct_present_terms(topic_text, query_domain_terms(topic_text))
+    lexical_terms = [term for term in text_search_terms(topic_text) if term in topic_text]
     candidates = [*formulas, *domain_terms, *lexical_terms]
     anchors = [
         term
@@ -2674,15 +2694,11 @@ def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
     return anchors[:max_terms]
 
 
-def primary_answer_anchor_terms(query: str) -> list[str]:
-    anchors = answer_anchor_terms(query)
-    formulas = extract_formula_terms(normalize_query_text(query))
-    if formulas:
-        return formulas
-    named = [term for term in anchors if term != "热熨"]
-    if named:
-        return named[:1]
-    return anchors[:1]
+def reliable_source_anchors(query: str) -> list[str]:
+    normalized = normalize_query_text(query)
+    formulas = extract_formula_terms(normalized)
+    named = [term for term in RELIABLE_SOURCE_NAMED_TERMS if term in normalized]
+    return dedupe_keep_order([*formulas, *named])[:8]
 
 
 def useful_query_terms(text: str, max_terms: int = 24) -> list[str]:
@@ -3278,7 +3294,7 @@ def filter_results_for_intent(
     if intent == "dosage":
         filtered = [result for result in results if is_dosage_relevant_result(result)]
     elif intent == "source_lookup":
-        anchors = primary_answer_anchor_terms(query)
+        anchors = reliable_source_anchors(query)
         if not anchors:
             return results
         return [
@@ -3399,30 +3415,25 @@ def build_followup_questions(
 ) -> list[str]:
     if intent != "clinical":
         return []
-    context = "\n".join(
-        [
-            query,
-            *(str(node.get("content", "")) for node in guide_nodes[:6]),
-            *(str(unit.get("evidence_quote", "")) for unit in related_knowledge_units[:6]),
-        ]
-    )
-    questions: list[str] = []
-    if any(term in context for term in ("下利", "拉肚子", "腹泻", "热利", "寒利")):
-        questions.extend(
-            [
-                "下利是黄臭热利、清稀寒利，还是完谷不化？",
-                "有没有腹痛？腹痛的位置和按压后变化如何？",
-            ]
+
+    def clue_terms(text: str) -> list[str]:
+        return direct_present_terms(text, CLINICAL_EVIDENCE_CLUE_TERMS)
+
+    items = clue_terms(normalize_query_text(query))
+    for node in guide_nodes[:6]:
+        label = normalize_whitespace(str(node.get("label", "")))
+        items.extend(clue_terms(str(node.get("content", ""))))
+        items.extend(clue_terms(str(node.get("path", ""))))
+        if label:
+            items.append(label)
+    for unit in related_knowledge_units[:6]:
+        unit_text = "\n".join(
+            str(unit.get(field, ""))
+            for field in ("subject", "predicate", "object", "evidence_quote")
         )
-    if any(term in context for term in ("恶心", "呕", "干呕")):
-        questions.append("恶心是干呕、呕吐有物，还是水入即吐？")
-    if any(term in context for term in ("太阳", "表证", "发烧", "恶寒", "汗")):
-        questions.append("是否仍有表证，例如恶寒、发热、汗出或无汗、头项强痛？")
-    if any(term in context for term in ("心下痞", "肠鸣", "胃", "痞")):
-        questions.append("是否有心下痞满、肠鸣、胃中不适或水饮线索？")
-    if questions and any(term in context for term in ("方", "汤", "剂量", "药")):
-        questions.append("是否存在年龄、基础病、用药史、妊娠或附子/峻下药等风险因素？")
-    return dedupe_keep_order(questions)[:6]
+        items.extend(clue_terms(unit_text))
+    items = [item for item in dedupe_keep_order(items) if item][:6]
+    return [f"还需要进一步核对“{item}”吗？" for item in items]
 
 
 def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
