@@ -249,6 +249,12 @@ NAMED_RIGHT_QUERY_SUFFIXES = (
 )
 QUERY_BOUNDARY_CHARS = frozenset("，,。！？!?；;、：:（）()【】[]「」『』《》〈〉/\\|\t\r\n ")
 FORMULA_PRODUCT_CONTINUATIONS = ("圆", "锅", "装", "子", "产品", "包装")
+NAMED_EVIDENCE_SUFFIXES = {
+    "木香饼": ("热熨", "贴", "法"),
+    "太阳病": ("欲解", "证", "篇", "中"),
+    "一钱": ("是", "等于", "约", "换算", "为"),
+    "黄金比例": ("是", "为", "指"),
+}
 
 
 @dataclass(frozen=True)
@@ -2768,6 +2774,30 @@ def known_formula_terms_in_evidence(text: str) -> list[str]:
     return dedupe_keep_order(formula for _, formula in sorted(found))
 
 
+def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
+    normalized = normalize_query_text(text)
+    if anchor in KNOWN_FORMULA_ANCHORS:
+        return anchor in known_formula_terms_in_evidence(normalized)
+    if anchor not in RELIABLE_SOURCE_NAMED_TERMS:
+        return False
+    offset = normalized.find(anchor)
+    allowed_suffixes = NAMED_EVIDENCE_SUFFIXES.get(anchor, ())
+    while offset >= 0:
+        right = normalized[offset + len(anchor) :]
+        if (
+            not right
+            or right[0] in QUERY_BOUNDARY_CHARS
+            or any(right.startswith(suffix) for suffix in allowed_suffixes)
+        ):
+            return True
+        offset = normalized.find(anchor, offset + 1)
+    return False
+
+
+def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
+    return all(source_anchor_matches_evidence(anchor, text) for anchor in anchors)
+
+
 def reliable_source_anchors(query: str) -> list[str]:
     normalized = normalize_query_text(query)
     formulas = reliable_formula_anchors(normalized)
@@ -3358,9 +3388,9 @@ def citation_evidence_for_result(
         anchors = reliable_source_anchors(query)
         if anchors:
             for quote in unit_quotes:
-                if all(anchor in quote for anchor in anchors):
+                if evidence_contains_source_anchors(quote, anchors):
                     return anchor_evidence_snippet(quote, anchors)
-            if paragraph and all(anchor in paragraph for anchor in anchors):
+            if paragraph and evidence_contains_source_anchors(paragraph, anchors):
                 return anchor_evidence_snippet(paragraph, anchors)
     if unit_quotes:
         return unit_quotes[0]
@@ -3427,7 +3457,9 @@ def filter_results_for_intent(
         if not anchors:
             return results
         return [
-            result for result in results if all(anchor in result_evidence_text(result) for anchor in anchors)
+            result
+            for result in results
+            if evidence_contains_source_anchors(result_evidence_text(result), anchors)
         ]
     elif intent == "clinical":
         query_formulas = reliable_formula_anchors(query)

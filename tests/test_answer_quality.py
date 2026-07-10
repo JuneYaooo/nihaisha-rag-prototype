@@ -344,6 +344,41 @@ class AnswerQualityTests(unittest.TestCase):
 
         self.assertEqual([item["paragraph_id"] for item in filtered], ["p-direct"])
 
+    def test_source_filter_rejects_product_embeddings_in_evidence(self) -> None:
+        cases = (
+            ("桂枝汤出处", "新品桂枝汤圆上市"),
+            ("大承气汤出处", "厨房使用大承气汤锅"),
+            ("五苓散出处", "这是五苓散装产品"),
+            ("肾气丸出处", "儿童喜欢肾气丸子"),
+            ("木香饼出处", "木香饼干上市"),
+        )
+        for query, text in cases:
+            with self.subTest(query=query):
+                evidence = result(text)
+                self.assertEqual(
+                    pdf_vector.filter_results_for_intent(query, "source_lookup", [evidence]),
+                    [],
+                )
+                answer = pdf_vector.synthesize_pdf_rag_answer(query, [evidence])
+                self.assertEqual(answer["citations"], [])
+                self.assertIn("没有检索到足够可靠", answer["answer"])
+
+    def test_source_filter_accepts_valid_formula_and_named_anchor_prose(self) -> None:
+        cases = (
+            ("桂枝汤出处", "太阳中风，桂枝汤主之。"),
+            ("木香饼出处", "木香饼（生地木香作饼），热熨贴之。"),
+            ("太阳病原文", "太阳病欲解时，从巳至未上。"),
+            ("一钱原文", "一钱是5克。"),
+        )
+        for query, text in cases:
+            with self.subTest(query=query):
+                evidence = result(text)
+                self.assertEqual(
+                    pdf_vector.filter_results_for_intent(query, "source_lookup", [evidence]),
+                    [evidence],
+                )
+                self.assertTrue(pdf_vector.synthesize_pdf_rag_answer(query, [evidence])["citations"])
+
     def test_cough_followups_do_not_inject_unseen_gastrointestinal_clues(self) -> None:
         questions = pdf_vector.build_followup_questions(
             "患者咳嗽、怕冷、无汗",
