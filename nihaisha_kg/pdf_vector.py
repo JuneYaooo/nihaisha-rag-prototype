@@ -210,6 +210,24 @@ FORMULA_DOSAGE_SAFETY_NOTICE = (
     "现代药材来源、炮制、浓度和药效也和以前差很多。建议去线下正规中医渠道面诊辨证，"
     "不要私自购药有风险。"
 )
+SOURCE_LOOKUP_MARKERS = ("出处", "哪本书", "哪一本书", "哪一页", "哪一段", "原文")
+ANSWER_ANCHOR_EXCLUDED_TERMS = {
+    *SOURCE_LOOKUP_MARKERS,
+    "在哪里",
+    "在哪裡",
+    "在哪裏",
+    "方证",
+    "鉴别",
+    "比较",
+    "区别",
+    "主之",
+    "治法",
+    "材料",
+    "方法",
+    "来源",
+    "课程",
+    "相关线索",
+}
 
 
 @dataclass(frozen=True)
@@ -2612,8 +2630,10 @@ def detect_answer_intent(query: str) -> str:
     normalized = normalize_query_text(query)
     if "一钱" in normalized and ("克" in normalized or "多少" in normalized or "几" in normalized):
         return "dosage"
-    if "木香饼" in normalized or "热熨" in normalized or ("出处" in normalized and ("哪" in normalized or "哪本" in normalized)):
-        return "method"
+    if any(marker in normalized for marker in SOURCE_LOOKUP_MARKERS):
+        return "source_lookup"
+    if any(marker in normalized for marker in ("鉴别", "比较", "区别")):
+        return "comparison"
     clinical_markers = (
         "病人",
         "患者",
@@ -2630,25 +2650,39 @@ def detect_answer_intent(query: str) -> str:
         "男",
         "女",
         "岁",
+        "咳嗽",
+        "怕冷",
     )
     if any(marker in normalized for marker in clinical_markers):
         return "clinical"
     return "general"
 
 
-def expand_answer_query(query: str) -> str:
+def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
     normalized = normalize_query_text(query)
-    parts = [query]
-    if normalized != query:
-        parts.append(normalized)
-    intent = detect_answer_intent(normalized)
-    if intent == "dosage":
-        parts.append("一钱 克 钱 剂量 换算 度量衡 比例 汉制 今制 药房")
-    elif intent == "method":
-        parts.append("木香饼 热熨 生地木香作饼 神农本草经 结肿成核 乳中结核")
-    elif intent == "clinical":
-        parts.append("下利 恶心 干呕 黄臭 热利 葛根黄芩黄连汤 黄芩加半夏生姜汤 黄芩汤 半夏泻心汤 生姜泻心汤")
-    return " ".join(dedupe_keep_order(parts))
+    formulas = extract_formula_terms(normalized)
+    domain_terms = query_domain_terms(normalized)
+    lexical_terms = [term for term in text_search_terms(normalized) if term in normalized]
+    candidates = [*formulas, *domain_terms, *lexical_terms]
+    anchors = [
+        term
+        for term in dedupe_keep_order(candidates)
+        if len(term) >= 2 and term not in ANSWER_ANCHOR_EXCLUDED_TERMS
+    ]
+    if formulas or any(term not in SIX_CHANNEL_TERMS and term != "太阳病" for term in anchors):
+        anchors = [term for term in anchors if term not in SIX_CHANNEL_TERMS and term != "太阳病"]
+    return anchors[:max_terms]
+
+
+def primary_answer_anchor_terms(query: str) -> list[str]:
+    anchors = answer_anchor_terms(query)
+    formulas = extract_formula_terms(normalize_query_text(query))
+    if formulas:
+        return formulas
+    named = [term for term in anchors if term != "热熨"]
+    if named:
+        return named[:1]
+    return anchors[:1]
 
 
 def useful_query_terms(text: str, max_terms: int = 24) -> list[str]:
@@ -2689,7 +2723,7 @@ def build_followup_query(query: str, results: list[dict[str, object]], intent: s
     parts = [query, normalize_query_text(query)]
     if intent == "dosage":
         parts.append("剂量 换算 度量衡 比例 克 钱")
-    elif intent == "method":
+    elif intent == "source_lookup":
         parts.append("出处 原文 治法 材料 方法")
     elif intent == "clinical":
         parts.append("方证 鉴别 症状 加减 禁忌")
@@ -2718,8 +2752,10 @@ def build_followup_query(query: str, results: list[dict[str, object]], intent: s
 def intent_query_terms(intent: str) -> str:
     if intent == "dosage":
         return "一钱 克 钱 剂量 换算 度量衡 比例 汉制 今制 药房"
-    if intent == "method":
+    if intent == "source_lookup":
         return "出处 原文 治法 材料 方法 来源"
+    if intent == "comparison":
+        return "鉴别 比较 区别"
     if intent == "clinical":
         return "方证 鉴别 症状 加减 禁忌 表证 里证 寒热 虚实"
     return ""
@@ -3044,7 +3080,7 @@ def run_query_plan_search(
     result_sets: list[list[dict[str, object]]] = []
     for planned_query in query_plan:
         results = store.search(planned_query, limit=per_query_limit, mode=mode)
-        if mode == "hybrid" and intent in {"dosage", "method", "clinical"}:
+        if mode == "hybrid" and intent in {"dosage", "source_lookup", "clinical"}:
             knowledge_results = store.search_knowledge_units(planned_query, limit=per_query_limit)
             results = merge_results_by_paragraph(results, knowledge_results)
         results = filter_results_for_query(planned_query, results, intent)
@@ -3234,14 +3270,19 @@ def result_evidence_text(result: dict[str, object]) -> str:
     return "\n".join(parts)
 
 
-def filter_results_for_intent(intent: str, results: list[dict[str, object]]) -> list[dict[str, object]]:
+def filter_results_for_intent(
+    query: str,
+    intent: str,
+    results: list[dict[str, object]],
+) -> list[dict[str, object]]:
     if intent == "dosage":
         filtered = [result for result in results if is_dosage_relevant_result(result)]
-    elif intent == "method":
-        filtered = [
-            result
-            for result in results
-            if "木香饼" in result_evidence_text(result) or "热熨" in result_evidence_text(result)
+    elif intent == "source_lookup":
+        anchors = primary_answer_anchor_terms(query)
+        if not anchors:
+            return results
+        return [
+            result for result in results if all(anchor in result_evidence_text(result) for anchor in anchors)
         ]
     elif intent == "clinical":
         clinical_filtered = [result for result in results if is_clinical_relevant_result(result)]
@@ -3379,7 +3420,7 @@ def build_followup_questions(
         questions.append("是否仍有表证，例如恶寒、发热、汗出或无汗、头项强痛？")
     if any(term in context for term in ("心下痞", "肠鸣", "胃", "痞")):
         questions.append("是否有心下痞满、肠鸣、胃中不适或水饮线索？")
-    if any(term in context for term in ("方", "汤", "剂量", "药")):
+    if questions and any(term in context for term in ("方", "汤", "剂量", "药")):
         questions.append("是否存在年龄、基础病、用药史、妊娠或附子/峻下药等风险因素？")
     return dedupe_keep_order(questions)[:6]
 
@@ -3474,7 +3515,7 @@ def synthesize_pdf_rag_answer(
     max_citations: int = 6,
 ) -> dict[str, object]:
     intent = detect_answer_intent(query)
-    relevant_results = filter_results_for_intent(intent, results)
+    relevant_results = filter_results_for_intent(query, intent, results)
     effective_max_citations = max_citations
     citations = build_citations(
         relevant_results,
@@ -3485,7 +3526,7 @@ def synthesize_pdf_rag_answer(
     cited = citations if intent == "dosage" else citations[:3]
     citation_refs = "、".join(f"[{citation['index']}]" for citation in cited)
 
-    if not results:
+    if not relevant_results:
         return {
             "query": query,
             "intent": intent,
@@ -3505,22 +3546,30 @@ def synthesize_pdf_rag_answer(
             "不能只抽出一个克数孤立使用。"
         )
         safety_notice = with_formula_dosage_safety("这是课程资料整理和出处检索，不是个人用药剂量建议。")
-    elif intent == "method":
+    elif intent == "source_lookup":
+        anchors = answer_anchor_terms(query)
+        topic = "、".join(anchors[:3]) or normalize_query_text(query).rstrip("。！？!?；;，,")
         locations = "；".join(f"{citation['label']}[{citation['index']}]" for citation in citations[:4])
-        answer = (
-            f"关于“木香饼热熨法”，当前检索到的主要出处是：{locations}。"
-            "原文证据集中在“木香饼（生地木香作饼），热熨贴之，治结肿成核”等内容，"
-            "视频同步文稿还解释为用生地与木香做饼，并以热熨方式作用于硬结、结块相关语境。"
+        excerpts = "；".join(
+            f"[{citation['index']}] {citation['evidence_quote']}" for citation in citations[:4]
         )
-        safety_notice = with_formula_dosage_safety("这是原文出处定位和课程整理，不是外治法操作建议。")
+        answer = f"关于“{topic}”，当前检索到的原文位置是：{locations}。原文摘录：{excerpts}"
+        has_formula_content = bool(extract_formula_terms(query)) or bool(collect_formula_names(relevant_results))
+        safety_notice = (
+            with_formula_dosage_safety("这是原文出处定位和课程整理，不是个人用药建议。")
+            if has_formula_content
+            else ""
+        )
     elif intent == "clinical":
         formulas = collect_formula_names(relevant_results)[:8]
         formula_text = "、".join(formulas) if formulas else "未稳定抽取到方名"
+        focus_clues = clinical_evidence_clues(normalize_query_text(query))
+        focus_text = "、".join(focus_clues) if focus_clues else "问题中描述的症状"
+        citation_sentence = f"可核对原文证据 {citation_refs}。" if citation_refs else ""
         answer = (
             "这个问题含有具体病人信息，我不直接给个人处方。"
-            f"按课程资料检索，相关辨证线索和方证包括：{formula_text}。"
-            f"可先核对原文证据 {citation_refs}，重点看下利性质、是否恶心干呕、是否腹痛、"
-            "是否仍有表证、心下痞满或肠鸣等条件。若用于真实病人，需要由合格医师面诊辨证。"
+            f"问题焦点是：{focus_text}。按课程资料检索，相关原文中出现的方名包括：{formula_text}。"
+            f"{citation_sentence}若用于真实病人，需要由合格医师面诊辨证。"
         )
         safety_notice = with_formula_dosage_safety("课程资料不能替代诊断；这里不直接给个人处方、剂量或治疗建议。")
     else:
@@ -3531,7 +3580,8 @@ def synthesize_pdf_rag_answer(
             )
         else:
             points = "；".join(evidence_quote(str(result.get("text", "")), max_chars=80) for result in results[:3])
-        answer = f"根据当前检索结果，相关原文要点包括：{points}。证据见 {citation_refs}。"
+        citation_sentence = f"证据见 {citation_refs}。" if citation_refs else ""
+        answer = f"根据当前检索结果，相关原文要点包括：{points}。{citation_sentence}"
         safety_notice = ""
 
     return {
@@ -3592,7 +3642,7 @@ def answer_pdf_rag(
             intent=intent,
         )
         results = reciprocal_rank_fuse([results, followup_results], limit=max(candidate_limit * 2, 32))
-    intent_results = filter_results_for_intent(intent, results)
+    intent_results = filter_results_for_intent(query, intent, results)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
     guide_query_parts = [

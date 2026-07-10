@@ -21,7 +21,7 @@ from nihaisha_kg.pdf_vector import (
     augment_pdf_vector_store_questions,
     build_differentiation_flow,
     build_query_plan,
-    expand_answer_query,
+    answer_anchor_terms,
     extract_formula_terms,
     extract_knowledge_units_from_paragraph,
     filter_results_for_intent,
@@ -612,16 +612,14 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(answer["related_knowledge_units"][0]["page_start"], 20)
         self.assertEqual(answer["related_knowledge_units"][0]["label"], "仲景心法.pdf p20")
 
-    def test_dosage_query_expansion_uses_generic_terms_not_fixed_answer_values(self) -> None:
-        expanded = expand_answer_query("古时候的一钱，是现代的多少克？")
+    def test_source_query_plan_and_anchors_use_named_topic_without_fixed_method_terms(self) -> None:
+        plan = build_query_plan("桂枝汤的出处在哪本书哪一页？", intent="source_lookup")
+        anchors = answer_anchor_terms("桂枝汤的出处在哪本书哪一页？")
 
-        self.assertIn("剂量", expanded)
-        self.assertIn("换算", expanded)
-        self.assertIn("度量衡", expanded)
-        self.assertIn("比例", expanded)
-        self.assertNotIn("3.75克", expanded)
-        self.assertNotIn("3.6克", expanded)
-        self.assertNotIn("5克", expanded)
+        self.assertIn("桂枝汤", anchors)
+        self.assertTrue(any("出处" in query and "原文" in query for query in plan))
+        self.assertNotIn("木香饼", "\n".join(plan))
+        self.assertNotIn("热熨", "\n".join(plan))
 
     def test_build_query_plan_creates_multiple_generic_retrieval_queries(self) -> None:
         plan = build_query_plan("古时候的一钱，是现代的多少克？", intent="dosage")
@@ -845,7 +843,7 @@ class PdfVectorTests(unittest.TestCase):
             "matched_knowledge_units": [],
         }
 
-        filtered = filter_results_for_intent("clinical", [noisy, useful])
+        filtered = filter_results_for_intent("病人下利黄臭恶心", "clinical", [noisy, useful])
 
         self.assertEqual([item["paragraph_id"] for item in filtered], ["p-useful"])
 
@@ -870,6 +868,7 @@ class PdfVectorTests(unittest.TestCase):
         }
 
         filtered = filter_results_for_intent(
+            "病人下利黄臭恶心",
             "clinical",
             [formula_only, formula_with_clue, clue_cluster],
         )
@@ -917,7 +916,11 @@ class PdfVectorTests(unittest.TestCase):
             ],
         }
 
-        filtered = filter_results_for_intent("clinical", [symptom_only, formula_evidence])
+        filtered = filter_results_for_intent(
+            "病人下利恶心",
+            "clinical",
+            [symptom_only, formula_evidence],
+        )
 
         self.assertEqual([item["paragraph_id"] for item in filtered], ["p-formula"])
 

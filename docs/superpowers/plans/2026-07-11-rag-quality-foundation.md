@@ -564,7 +564,7 @@ Replace the `clinical` branch with:
         )
 ```
 
-Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, require at least one `answer_anchor_terms(query)` value in `result_evidence_text(result)` when anchors exist. Update `build_followup_questions` to derive questions only from query clues and retrieved guide nodes; if neither exists, return an empty list rather than the old diarrhea-specific defaults.
+Change `filter_results_for_intent` from `(intent, results)` to `(query, intent, results)` and update both call sites in `synthesize_pdf_rag_answer` and `answer_pdf_rag`. For `source_lookup`, identify the most-specific primary anchor (formula names first; otherwise the first reliable named anchor, with generic `热熨` secondary to `木香饼`) and require its direct occurrence in `result_evidence_text(result)`. If no reliable anchor exists, do not over-filter. Include only actual citation locations and excerpts in the synthesized source answer. Update `build_followup_questions` to derive questions only from query clues, retrieved guide nodes, and related knowledge units; if none supplies a differentiated clue, return an empty list rather than a generic or diarrhea-specific checklist.
 
 - [ ] **Step 4: Delete dead fixed query expansion**
 
