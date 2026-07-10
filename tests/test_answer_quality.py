@@ -27,12 +27,33 @@ def result(
 
 class AnswerQualityTests(unittest.TestCase):
     def test_reliable_formula_anchors_reject_natural_language_tang_phrases(self) -> None:
-        for query in ("这个汤的出处", "如何熬汤的原文", "有哪些相关汤方的原文"):
+        generic = (
+            "这个汤",
+            "如何熬汤",
+            "有哪些相关汤方",
+            "喝汤",
+            "鸡汤",
+            "热汤",
+            "一碗汤",
+            "米汤",
+            "煎汤",
+            "喝热汤",
+            "一碗热汤",
+        )
+        for phrase in generic:
+            query = f"{phrase}的出处"
             with self.subTest(query=query):
                 self.assertEqual(pdf_vector.reliable_source_anchors(query), [])
-        for formula in ("桂枝汤", "麻黄汤", "四逆汤", "真武汤"):
+        for formula in ("桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤", "理中汤"):
             with self.subTest(formula=formula):
                 self.assertEqual(pdf_vector.reliable_source_anchors(f"{formula}出处"), [formula])
+
+    def test_generic_soup_source_query_does_not_hard_filter_candidates(self) -> None:
+        candidate = result("课程中讨论饮食与汤液的日常语境。")
+
+        filtered = pdf_vector.filter_results_for_intent("喝汤出处", "source_lookup", [candidate])
+
+        self.assertEqual(filtered, [candidate])
 
     def test_source_lookup_answer_uses_retrieved_formula_and_location_only(self) -> None:
         answer = pdf_vector.synthesize_pdf_rag_answer(

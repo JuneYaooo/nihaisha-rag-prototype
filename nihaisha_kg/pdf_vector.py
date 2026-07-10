@@ -232,6 +232,9 @@ RELIABLE_SOURCE_NAMED_TERMS = ("木香饼", "一钱", "太阳病", "黄金比例
 UNRELIABLE_FORMULA_ANCHOR_MARKERS = (
     "这个", "那个", "哪些", "相关", "如何", "怎么", "什么", "熬", "煮", "的"
 )
+RELIABLE_TANG_KNOWN_FORMULAS = {
+    "桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤", "理中汤"
+}
 
 
 @dataclass(frozen=True)
@@ -2702,11 +2705,16 @@ def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
 
 def is_reliable_formula_anchor(formula: str) -> bool:
     normalized = normalize_query_text(formula).strip()
-    if not normalized or normalized == "个汤":
+    if len(normalized) < 3:
         return False
     if any(marker in normalized for marker in UNRELIABLE_FORMULA_ANCHOR_MARKERS):
         return False
-    return bool(re.fullmatch(r"[\u4e00-\u9fff]{1,7}(?:汤|丸|散|饮|膏|丹)", normalized))
+    if not re.fullmatch(r"[\u4e00-\u9fff]{2,7}(?:汤|丸|散|饮|膏|丹)", normalized):
+        return False
+    if normalized.endswith("汤"):
+        body = normalized[:-1]
+        return normalized in RELIABLE_TANG_KNOWN_FORMULAS or bool(set(body) & FORMULA_SIGNAL_CHARS)
+    return True
 
 
 def reliable_source_anchors(query: str) -> list[str]:
