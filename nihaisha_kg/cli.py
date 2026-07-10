@@ -25,9 +25,9 @@ from .rerank import (
     PUBLIC_RERANK_FEATURE_MAX_CHARS,
     PUBLIC_RERANK_MODEL_MAX_CHARS,
     SiliconFlowReranker,
-    normalize_rerank_outcome_results,
     safe_rerank_metadata_value,
     sanitize_rerank_error,
+    snapshot_rerank_outcome,
 )
 
 
@@ -361,15 +361,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.reranker == "siliconflow" or (
                 args.reranker == "auto" and siliconflow_api_key_available()
             ):
-                rerank_outcome = SiliconFlowReranker(model=args.rerank_model).rerank(
+                raw_rerank_outcome = SiliconFlowReranker(model=args.rerank_model).rerank(
                     args.query,
                     candidates,
                     limit=args.limit,
                 )
-                results = normalize_rerank_outcome_results(
-                    rerank_outcome,
+                rerank_outcome = snapshot_rerank_outcome(
+                    raw_rerank_outcome,
                     limit=args.limit,
                 )
+                results = rerank_outcome.results
             else:
                 results = list(candidates[: args.limit])
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.DatabaseError) as exc:

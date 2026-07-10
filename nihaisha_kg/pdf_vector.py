@@ -4299,40 +4299,24 @@ def answer_pdf_rag(
             limit=rerank_limit,
         )
     if rerank_outcome is not None:
-        from .rerank import normalize_rerank_outcome_results
+        from .rerank import snapshot_rerank_outcome
 
-        intent_results = normalize_rerank_outcome_results(
+        rerank_outcome = snapshot_rerank_outcome(
             rerank_outcome,
             limit=rerank_limit,
         )
+        intent_results = rerank_outcome.results
     _trace_phase_finish(latency_ms, "rerank", phase_started)
     phase_started = _trace_phase_start(trace_enabled)
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     _trace_phase_finish(latency_ms, "retrieval", phase_started)
     phase_started = _trace_phase_start(trace_enabled)
     answer = synthesize_pdf_rag_answer(query, results)
-    if rerank_outcome is not None:
-        from .rerank import (
-            PUBLIC_RERANK_ERROR_MAX_CHARS,
-            PUBLIC_RERANK_FEATURE_MAX_CHARS,
-            PUBLIC_RERANK_MODEL_MAX_CHARS,
-            safe_rerank_metadata_value,
-        )
-
     answer["rerank"] = (
         {
-            "model": safe_rerank_metadata_value(
-                rerank_outcome.model,
-                max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
-            ),
-            "degraded_feature": safe_rerank_metadata_value(
-                rerank_outcome.degraded_feature,
-                max_chars=PUBLIC_RERANK_FEATURE_MAX_CHARS,
-            ),
-            "error": safe_rerank_metadata_value(
-                rerank_outcome.error,
-                max_chars=PUBLIC_RERANK_ERROR_MAX_CHARS,
-            ),
+            "model": rerank_outcome.model,
+            "degraded_feature": rerank_outcome.degraded_feature,
+            "error": rerank_outcome.error,
         }
         if rerank_outcome is not None
         else {"model": "none", "degraded_feature": "", "error": ""}
@@ -4360,12 +4344,6 @@ def answer_pdf_rag(
     )
     _trace_phase_finish(latency_ms, "synthesis", phase_started)
     if trace_enabled:
-        from .rerank import (
-            PUBLIC_RERANK_FEATURE_MAX_CHARS,
-            PUBLIC_RERANK_MODEL_MAX_CHARS,
-            safe_rerank_metadata_value,
-        )
-
         selected_ids = [
             _safe_trace_string(
                 _trace_dict_get(result, "paragraph_id", ""),
@@ -4381,13 +4359,9 @@ def answer_pdf_rag(
                 for channel in _trace_channels(result)
             }
         )
-        model_value = safe_rerank_metadata_value(
-            rerank_outcome.model if rerank_outcome is not None else "none",
-            max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
-        ) or "none"
-        degraded_value = safe_rerank_metadata_value(
-            rerank_outcome.degraded_feature if rerank_outcome is not None else "",
-            max_chars=PUBLIC_RERANK_FEATURE_MAX_CHARS,
+        model_value = rerank_outcome.model if rerank_outcome is not None else "none"
+        degraded_value = (
+            rerank_outcome.degraded_feature if rerank_outcome is not None else ""
         )
         answer["trace"] = {
             "normalized_query": _safe_trace_string(

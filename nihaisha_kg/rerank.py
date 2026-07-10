@@ -36,9 +36,22 @@ def sanitize_rerank_error(
         except Exception:
             raw_message = f"<{type(error).__name__}>"
     raw_message = re.sub(
+        r"\x1b\][^\x07\r\n]*(?:\x07|\x1b\\)",
+        "",
+        raw_message,
+    )
+    raw_message = re.sub(
+        r"\x1b\[[0-?]*[ -/]*[@-~]",
+        "",
+        raw_message,
+    )
+    raw_message = re.sub(r"\x1b[@-_]?", "", raw_message)
+    raw_message = re.sub(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", raw_message)
+    raw_message = re.sub(
         r'''(?ix)
-        (?P<prefix>["']?authorization["']?\s*[:=]\s*)
-        [^\r\n\x00-\x1f\x7f-\x9f]*
+        (?<![A-Za-z0-9_-])
+        (?P<prefix>["']?authorization["']?[ \t]*[:=][ \t]*)
+        [^\r\n]+
         ''',
         r"\g<prefix>[REDACTED]",
         raw_message,
@@ -64,7 +77,6 @@ def sanitize_rerank_error(
             | private[_-]?key
             | password
             | passwd
-            | authorization
             | token
             | secret
         )
@@ -136,6 +148,34 @@ class RerankOutcome:
     model: str
     degraded_feature: str = ""
     error: str = ""
+
+
+def snapshot_rerank_outcome(outcome: object, *, limit: int) -> RerankOutcome:
+    try:
+        results = object.__getattribute__(outcome, "results")
+        model = object.__getattribute__(outcome, "model")
+        degraded_feature = object.__getattribute__(outcome, "degraded_feature")
+        error = object.__getattribute__(outcome, "error")
+        safe_model = safe_rerank_metadata_value(
+            model,
+            max_chars=PUBLIC_RERANK_MODEL_MAX_CHARS,
+        )
+        safe_degraded_feature = safe_rerank_metadata_value(
+            degraded_feature,
+            max_chars=PUBLIC_RERANK_FEATURE_MAX_CHARS,
+        )
+        safe_error = safe_rerank_metadata_value(
+            error,
+            max_chars=PUBLIC_RERANK_ERROR_MAX_CHARS,
+        )
+    except Exception:
+        raise RuntimeError("invalid reranker outcome") from None
+    return RerankOutcome(
+        results=normalize_rerank_results(results, limit=limit),
+        model=safe_model,
+        degraded_feature=safe_degraded_feature,
+        error=safe_error,
+    )
 
 
 class SiliconFlowReranker:

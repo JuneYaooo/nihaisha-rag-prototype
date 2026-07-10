@@ -905,6 +905,7 @@ class PdfVectorTests(unittest.TestCase):
                 "results": [{"paragraph_id": str(index), "text": "evidence"} for index in range(1000)],
                 "model": "model",
                 "degraded_feature": "",
+                "error": "",
             },
         )()
         FakeReranker.outcome = oversized
@@ -927,7 +928,12 @@ class PdfVectorTests(unittest.TestCase):
         FakeReranker.outcome = type(
             "Outcome",
             (),
-            {"results": HostileList(candidates), "model": "model", "degraded_feature": ""},
+            {
+                "results": HostileList(candidates),
+                "model": "model",
+                "degraded_feature": "",
+                "error": "",
+            },
         )()
         stderr = io.StringIO()
         with (
@@ -944,7 +950,7 @@ class PdfVectorTests(unittest.TestCase):
         FakeReranker.outcome = type(
             "Outcome",
             (),
-            {"results": [object()], "model": "model", "degraded_feature": ""},
+            {"results": [object()], "model": "model", "degraded_feature": "", "error": ""},
         )()
         with (
             patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
@@ -957,6 +963,32 @@ class PdfVectorTests(unittest.TestCase):
                 ),
                 1,
             )
+
+        class RaisingMetadataOutcome:
+            results = [{"paragraph_id": "p1", "text": "evidence"}]
+            degraded_feature = ""
+            error = ""
+
+            @property
+            def model(self) -> object:
+                raise RuntimeError("credential-sentinel")
+
+        FakeReranker.outcome = RaisingMetadataOutcome()
+        stderr = io.StringIO()
+        with (
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.cli.SiliconFlowReranker", FakeReranker),
+            patch("sys.stderr", stderr),
+        ):
+            status = rag_cli.main(
+                [
+                    "search", "q", "--mode", "text", "--reranker", "siliconflow",
+                    "--limit", "1", "--json", "--trace",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("invalid reranker outcome", stderr.getvalue())
+        self.assertFalse("credential-sentinel" in stderr.getvalue())
 
     def test_cli_search_trace_is_allowlisted_bounded_and_reflects_selected_rows(self) -> None:
         secret = "sk-hostile-secret-123456789"
@@ -981,7 +1013,7 @@ class PdfVectorTests(unittest.TestCase):
             status = rag_cli.main(
                 [
                     "search",
-                    f"query Authorization: Basic {secret}",
+                    f"query Auth\x00orization: Basic {secret}",
                     "--mode",
                     "text",
                     "--reranker",
@@ -1105,7 +1137,7 @@ class PdfVectorTests(unittest.TestCase):
         with (
             patch(
                 "nihaisha_kg.cli.answer_pdf_rag",
-                side_effect=RuntimeError(f"authorization=Bearer {secret}"),
+                side_effect=RuntimeError(f"Auth\x00orization=Basic {secret}"),
             ),
             patch("sys.stderr", stderr),
         ):
@@ -2179,7 +2211,7 @@ class PdfVectorTests(unittest.TestCase):
             patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesized),
         ):
             traced = answer_pdf_rag(
-                f"question api_key={secret}",
+                f"question Auth\x1b[31morization: Basic {secret}",
                 Path("/unused.sqlite"),
                 mode="text",
                 trace_enabled=True,
@@ -2351,6 +2383,34 @@ class PdfVectorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid reranker results"):
                 answer_pdf_rag(
                     "query", Path("/unused.sqlite"), mode="text", limit=1, reranker_backend=backend
+                )
+
+        class RaisingMetadataOutcome:
+            results = [candidate]
+            degraded_feature = ""
+            error = ""
+
+            @property
+            def model(self) -> object:
+                raise RuntimeError("credential-sentinel")
+
+        class RaisingBackend:
+            def rerank(self, *_args: object, **_kwargs: object) -> object:
+                return RaisingMetadataOutcome()
+
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["query"]),
+            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=[candidate]),
+            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=[candidate]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "^invalid reranker outcome$"):
+                answer_pdf_rag(
+                    "query",
+                    Path("/unused.sqlite"),
+                    mode="text",
+                    limit=1,
+                    reranker_backend=RaisingBackend(),
                 )
 
         backend.results = [object()]

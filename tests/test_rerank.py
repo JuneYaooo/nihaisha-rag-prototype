@@ -15,6 +15,7 @@ from nihaisha_kg.rerank import (
     SiliconFlowReranker,
     normalize_rerank_outcome_results,
     normalize_rerank_results,
+    snapshot_rerank_outcome,
     sanitize_rerank_error,
 )
 
@@ -111,7 +112,31 @@ class RerankTests(unittest.TestCase):
                 self.assertFalse(credential in sanitized)
                 self.assertIn("[REDACTED]", sanitized)
         self.assertIn("next-line: retained", sanitize_rerank_error(messages[-2]))
-        self.assertIn("next-field: retained", sanitize_rerank_error(messages[-1]))
+        self.assertNotIn("next-field: retained", sanitize_rerank_error(messages[-1]))
+
+    def test_sanitizer_removes_control_and_ansi_authorization_bypasses(self) -> None:
+        credential = "credential-sentinel"
+        messages = (
+            f"Auth\x00orization: Basic {credential}",
+            f"Authorization:\x00Digest username={credential}, realm=private",
+            f"Authorization: Bear\x07er {credential}",
+            f"Auth\x1b[31morization: Basic {credential}",
+            f"Authorization:\x1b[2m Digest username={credential}",
+        )
+
+        for message in messages:
+            sanitized = sanitize_rerank_error(message)
+            self.assertFalse(credential in sanitized)
+            self.assertEqual(sanitized.count("[REDACTED]"), 1)
+            self.assertFalse("[REDACTED]]" in sanitized)
+
+        multiline = sanitize_rerank_error(
+            f"Authorization:\r\nbenign-line\r\napi_key={credential}"
+        )
+        self.assertIn("Authorization:", multiline)
+        self.assertIn("benign-line", multiline)
+        self.assertFalse(credential in multiline)
+        self.assertEqual(multiline.count("[REDACTED]"), 1)
 
     def test_normalize_rerank_results_uses_exact_bounded_containers(self) -> None:
         class HostileList(list[dict[str, object]]):
@@ -139,6 +164,42 @@ class RerankTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "invalid reranker results container"):
             normalize_rerank_outcome_results(HostileOutcome(), limit=1)
+
+    def test_snapshot_rerank_outcome_guards_and_sanitizes_every_property(self) -> None:
+        credential = "credential-sentinel"
+
+        class CustomOutcome:
+            results = [{"paragraph_id": "p1"}]
+            model = f"model api_key={credential}" + "m" * 1000
+            degraded_feature = f"Authorization: Basic {credential}" + "d" * 1000
+            error = f"token={credential}" + "e" * 1000
+
+        snapshot = snapshot_rerank_outcome(CustomOutcome(), limit=1)
+
+        self.assertEqual(type(snapshot).__name__, "RerankOutcome")
+        self.assertEqual(snapshot.results, [{"paragraph_id": "p1"}])
+        self.assertFalse(credential in snapshot.model)
+        self.assertFalse(credential in snapshot.degraded_feature)
+        self.assertFalse(credential in snapshot.error)
+        self.assertLessEqual(len(snapshot.model), 120)
+        self.assertLessEqual(len(snapshot.degraded_feature), 80)
+        self.assertLessEqual(len(snapshot.error), 240)
+
+        for field in ("results", "model", "degraded_feature", "error"):
+            class RaisingOutcome:
+                results = [{"paragraph_id": "p1"}]
+                model = "model"
+                degraded_feature = ""
+                error = ""
+
+            setattr(
+                RaisingOutcome,
+                field,
+                property(lambda _self: (_ for _ in ()).throw(RuntimeError(credential))),
+            )
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(RuntimeError, "^invalid reranker outcome$"):
+                    snapshot_rerank_outcome(RaisingOutcome(), limit=1)
 
     def test_posts_documented_request_and_maps_score_order_without_mutation(self) -> None:
         session = FakeSession(
