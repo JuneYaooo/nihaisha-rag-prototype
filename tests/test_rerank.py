@@ -5,7 +5,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from nihaisha_kg.rerank import SiliconFlowReranker
+from nihaisha_kg.rerank import SiliconFlowReranker, sanitize_rerank_error
 
 
 class FakeResponse:
@@ -39,6 +39,20 @@ class FakeSession:
 
 
 class RerankTests(unittest.TestCase):
+    def test_sanitizer_redacts_quoted_and_unquoted_authorization_values_atomically(self) -> None:
+        messages = (
+            "Authorization: Bearer supersecret",
+            'Authorization="Bearer supersecret"',
+            "Authorization='Bearer supersecret'",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                sanitized = sanitize_rerank_error(message)
+                self.assertNotIn("supersecret", sanitized)
+                self.assertNotIn("Bearer", sanitized)
+                self.assertIn("[REDACTED]", sanitized)
+
     def test_posts_documented_request_and_maps_score_order_without_mutation(self) -> None:
         session = FakeSession(
             {

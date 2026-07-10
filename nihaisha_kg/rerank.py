@@ -25,7 +25,14 @@ def sanitize_rerank_error(
         if isinstance(secret, str) and secret:
             message = message.replace(secret, "[REDACTED]")
     message = re.sub(
-        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;}\]]+",
+        r'''(?ix)
+        \bauthorization\s*[:=]\s*
+        (?:
+            "(?:\\.|[^"])*"
+            | '(?:\\.|[^'])*'
+            | (?:bearer\s+)?[^\s,;}\]]+
+        )
+        ''',
         "Authorization: [REDACTED]",
         message,
     )
