@@ -272,6 +272,7 @@ git commit -m "test: add retrieval quality evaluation contract"
 - Create: `nihaisha_kg/normalization.py`
 - Create: `tests/test_normalization.py`
 - Modify: `nihaisha_kg/pdf_vector.py:461-483,2603-2630`
+- Modify: `tests/test_pdf_vector.py`
 
 - [ ] **Step 1: Write failing Chinese query and real retrieval tests**
 
@@ -394,7 +395,7 @@ Expected: all selected helper, delegation, cross-script SQLite retrieval, and co
 - [ ] **Step 6: Commit**
 
 ```bash
-git add nihaisha_kg/normalization.py nihaisha_kg/pdf_vector.py tests/test_normalization.py
+git add nihaisha_kg/normalization.py nihaisha_kg/pdf_vector.py tests/test_normalization.py tests/test_pdf_vector.py
 git commit -m "fix: preserve Chinese lexical query meaning"
 ```
 
