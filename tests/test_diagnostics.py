@@ -378,6 +378,70 @@ class DiagnosticsTests(unittest.TestCase):
         codes = {item["code"] for item in report["diagnoses"]}
         self.assertIn("meta_invalid", codes)
 
+    def test_doctor_accepts_uppercase_meta_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executescript(
+                    """
+                    ALTER TABLE meta RENAME TO old_meta;
+                    CREATE TABLE META(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO META SELECT key, value FROM old_meta;
+                    DROP TABLE old_meta;
+                    """
+                )
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        self.assertEqual(report["status"], "ok")
+
+    def test_doctor_rejects_meta_views_case_insensitively(self) -> None:
+        for view_name in ("meta", "META"):
+            with self.subTest(view_name=view_name), tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "rag.sqlite"
+                store = LocalVectorStore(db_path)
+                store.recreate()
+                store.rebuild_text_index()
+                store.rebuild_knowledge_units()
+                with closing(sqlite3.connect(db_path)) as conn:
+                    conn.executescript(
+                        f"""
+                        ALTER TABLE meta RENAME TO backing_meta;
+                        CREATE VIEW {view_name} AS SELECT key, value FROM backing_meta;
+                        """
+                    )
+
+                report = doctor(db_path, faiss_loader=lambda: None)
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertEqual(report["status"], "error")
+            self.assertIn("meta_invalid", codes)
+
+    def test_doctor_accepts_uppercase_required_table_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE PARAGRAPHS(paragraph_id TEXT);
+                    CREATE TABLE RETRIEVAL_UNITS(unit_id TEXT);
+                    CREATE TABLE PARAGRAPHS_FTS(paragraph_id TEXT);
+                    CREATE TABLE KNOWLEDGE_UNITS(knowledge_unit_id TEXT);
+                    CREATE TABLE META(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO META VALUES ('vector_kind', 'sparse');
+                    INSERT INTO META VALUES ('embedding', 'sparse_hash');
+                    INSERT INTO META VALUES ('vector_dim', '2048');
+                    """
+                )
+
+            report = doctor(db_path, faiss_loader=lambda: None)
+
+        self.assertEqual(report["status"], "ok")
+
     def test_doctor_reports_faiss_dimension_mismatch(self) -> None:
         class Index:
             ntotal = 1

@@ -161,15 +161,20 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
         with closing(sqlite3.connect(db_uri, uri=True)) as conn:
             schema_names = (*REQUIRED_TABLES, "meta")
             placeholders = ",".join("?" for _ in schema_names)
-            tables = {
-                str(row[0])
+            schema_objects = [
+                (str(row[0]), str(row[1]))
                 for row in conn.execute(
-                    f"""SELECT name FROM sqlite_master
-                    WHERE type IN ('table', 'view') AND name IN ({placeholders})""",
+                    f"""SELECT name, type FROM sqlite_master
+                    WHERE name COLLATE NOCASE IN ({placeholders})""",
                     schema_names,
                 )
+            ]
+            tables = {
+                name.casefold()
+                for name, object_type in schema_objects
+                if object_type in {"table", "view"}
             }
-            missing_tables = [name for name in REQUIRED_TABLES if name not in tables]
+            missing_tables = [name for name in REQUIRED_TABLES if name.casefold() not in tables]
             if missing_tables:
                 add(
                     "schema_missing_tables",
@@ -180,8 +185,15 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
             else:
                 add("schema", "ok", "required SQLite tables are present")
 
-            if "meta" not in tables:
+            meta_objects = [
+                (name, object_type)
+                for name, object_type in schema_objects
+                if name.casefold() == "meta"
+            ]
+            if not meta_objects:
                 add("meta_missing", "warning", "metadata table is missing")
+            elif len(meta_objects) != 1 or meta_objects[0][1] != "table":
+                add("meta_invalid", "error", "metadata object is invalid")
             else:
                 try:
                     placeholders = ",".join("?" for _ in RECOGNIZED_META_KEYS)
