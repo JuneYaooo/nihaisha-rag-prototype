@@ -271,6 +271,43 @@ class AnswerQualityTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(pdf_vector.reliable_source_anchors(query), expected)
 
+    def test_named_source_anchors_require_query_boundaries(self) -> None:
+        for query in ("木香饼干出处", "太阳病人原文", "一钱包原文"):
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_source_anchors(query), [])
+        positives = {
+            "木香饼出处": ["木香饼"],
+            "太阳病原文": ["太阳病"],
+            "一钱是多少克": ["一钱"],
+            "一钱原文": ["一钱"],
+        }
+        for query, expected in positives.items():
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_source_anchors(query), expected)
+
+    def test_source_citation_keeps_anchor_after_long_paragraph_prefix(self) -> None:
+        paragraph = "背景说明" * 65 + "。太阳中风，桂枝汤主之。"
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [result(paragraph)])
+        excerpt = answer["citations"][0]["evidence_quote"]
+
+        self.assertIn("桂枝汤", excerpt)
+        self.assertLessEqual(len(excerpt), 220)
+
+    def test_generic_source_query_uses_formula_safety_from_evidence_prose(self) -> None:
+        answer = pdf_vector.synthesize_pdf_rag_answer(
+            "这种方的原文",
+            [result("太阳中风，桂枝汤主之。")],
+        )
+
+        self.assertIn(pdf_vector.FORMULA_DOSAGE_SAFETY_NOTICE, answer["safety_notice"])
+
+    def test_product_formula_embeddings_in_evidence_do_not_trigger_safety(self) -> None:
+        for text in ("桂枝汤圆新品。", "大承气汤锅介绍。", "五苓散装产品。", "肾气丸子包装。"):
+            with self.subTest(text=text):
+                answer = pdf_vector.synthesize_pdf_rag_answer("这种产品的原文", [result(text)])
+                self.assertEqual(answer["safety_notice"], "")
+
     def test_source_filter_requires_primary_anchor_when_direct_evidence_exists(self) -> None:
         generic = result("用火温之，再以热熨法处理。", paragraph_id="p-generic")
         direct = result("木香饼（生地木香作饼），热熨贴之。", paragraph_id="p-direct")

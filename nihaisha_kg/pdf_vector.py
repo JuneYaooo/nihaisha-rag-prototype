@@ -244,7 +244,11 @@ FORMULA_RIGHT_QUERY_SUFFIXES = (
     "的出处", "出处", "原文", "哪本书", "哪一页", "方证", "主治", "对应",
     "如何", "鉴别", "比较", "区别", "和", "与", "、",
 )
+NAMED_RIGHT_QUERY_SUFFIXES = (
+    *FORMULA_RIGHT_QUERY_SUFFIXES, "的原文", "热熨法", "是", "多少", "几克", "换算"
+)
 QUERY_BOUNDARY_CHARS = frozenset("，,。！？!?；;、：:（）()【】[]「」『』《》〈〉/\\|\t\r\n ")
+FORMULA_PRODUCT_CONTINUATIONS = ("圆", "锅", "装", "子", "产品", "包装")
 
 
 @dataclass(frozen=True)
@@ -2713,18 +2717,17 @@ def answer_anchor_terms(query: str, max_terms: int = 8) -> list[str]:
     return anchors[:max_terms]
 
 
-def is_reliable_formula_anchor(formula: str) -> bool:
-    normalized = normalize_query_text(formula).strip()
-    return normalized in KNOWN_FORMULA_ANCHORS
-
-
-def reliable_formula_anchors(query: str) -> list[str]:
+def bounded_query_terms(
+    query: str,
+    terms: Iterable[str],
+    right_suffixes: tuple[str, ...],
+) -> list[str]:
     normalized = normalize_query_text(query)
     occurrences: list[tuple[int, int, str]] = []
-    for formula in sorted(KNOWN_FORMULA_ANCHORS, key=lambda item: (-len(item), item)):
-        offset = normalized.find(formula)
+    for term in sorted(set(terms), key=lambda item: (-len(item), item)):
+        offset = normalized.find(term)
         while offset >= 0:
-            end = offset + len(formula)
+            end = offset + len(term)
             left = normalized[:offset]
             right = normalized[end:]
             left_ok = (
@@ -2735,11 +2738,11 @@ def reliable_formula_anchors(query: str) -> list[str]:
             right_ok = (
                 not right
                 or right[0] in QUERY_BOUNDARY_CHARS
-                or any(right.startswith(suffix) for suffix in FORMULA_RIGHT_QUERY_SUFFIXES)
+                or any(right.startswith(suffix) for suffix in right_suffixes)
             )
             if left_ok and right_ok:
-                occurrences.append((offset, end, formula))
-            offset = normalized.find(formula, offset + 1)
+                occurrences.append((offset, end, term))
+            offset = normalized.find(term, offset + 1)
     selected: list[tuple[int, int, str]] = []
     for start, end, formula in sorted(occurrences, key=lambda item: (item[0], -len(item[2]), item[2])):
         if any(start < kept_end and end > kept_start for kept_start, kept_end, _ in selected):
@@ -2748,10 +2751,27 @@ def reliable_formula_anchors(query: str) -> list[str]:
     return [formula for _, _, formula in selected]
 
 
+def reliable_formula_anchors(query: str) -> list[str]:
+    return bounded_query_terms(query, KNOWN_FORMULA_ANCHORS, FORMULA_RIGHT_QUERY_SUFFIXES)
+
+
+def known_formula_terms_in_evidence(text: str) -> list[str]:
+    normalized = normalize_query_text(text)
+    found: list[tuple[int, str]] = []
+    for formula in sorted(KNOWN_FORMULA_ANCHORS, key=lambda item: (-len(item), item)):
+        offset = normalized.find(formula)
+        while offset >= 0:
+            right = normalized[offset + len(formula) :]
+            if not any(right.startswith(continuation) for continuation in FORMULA_PRODUCT_CONTINUATIONS):
+                found.append((offset, formula))
+            offset = normalized.find(formula, offset + 1)
+    return dedupe_keep_order(formula for _, formula in sorted(found))
+
+
 def reliable_source_anchors(query: str) -> list[str]:
     normalized = normalize_query_text(query)
     formulas = reliable_formula_anchors(normalized)
-    named = [term for term in RELIABLE_SOURCE_NAMED_TERMS if term in normalized]
+    named = bounded_query_terms(normalized, RELIABLE_SOURCE_NAMED_TERMS, NAMED_RIGHT_QUERY_SUFFIXES)
     return dedupe_keep_order([*formulas, *named])[:8]
 
 
@@ -3266,6 +3286,35 @@ def dosage_evidence_snippet(text: str, max_chars: int = 520) -> str:
     return evidence_quote(text[start:end], max_chars=max_chars)
 
 
+def anchor_evidence_snippet(text: str, anchors: list[str], max_chars: int = 220) -> str:
+    sentences = [sentence.strip() for sentence in split_sentences(text) if sentence.strip()]
+    for sentence in sentences:
+        if all(anchor in sentence for anchor in anchors) and len(sentence) <= max_chars:
+            return sentence
+    selected = dedupe_keep_order(
+        sentence for anchor in anchors for sentence in sentences if anchor in sentence
+    )
+    joined = " ".join(selected)
+    if selected and len(joined) <= max_chars and all(anchor in joined for anchor in anchors):
+        return joined
+    offsets = [text.find(anchor) for anchor in anchors]
+    if offsets and all(offset >= 0 for offset in offsets):
+        span_start = min(offsets)
+        span_end = max(offset + len(anchor) for offset, anchor in zip(offsets, anchors))
+        if span_end - span_start <= max_chars:
+            context = max_chars - (span_end - span_start)
+            start = max(0, span_start - context // 2)
+            end = min(len(text), start + max_chars)
+            start = max(0, end - max_chars)
+            return text[start:end].strip()
+    snippets = [
+        evidence_quote(text[max(0, offset - 20) : offset + len(anchor) + 20], max_chars=48)
+        for offset, anchor in zip(offsets, anchors)
+        if offset >= 0
+    ]
+    return " … ".join(snippets)[:max_chars]
+
+
 def citation_evidence_for_result(
     result: dict[str, object],
     intent: str = "general",
@@ -3295,9 +3344,9 @@ def citation_evidence_for_result(
         if anchors:
             for quote in unit_quotes:
                 if all(anchor in quote for anchor in anchors):
-                    return quote
+                    return anchor_evidence_snippet(quote, anchors)
             if paragraph and all(anchor in paragraph for anchor in anchors):
-                return evidence_quote(paragraph, max_chars=220).strip()
+                return anchor_evidence_snippet(paragraph, anchors)
     if unit_quotes:
         return unit_quotes[0]
     return evidence_quote(paragraph, max_chars=220).strip()
@@ -3651,7 +3700,7 @@ def synthesize_pdf_rag_answer(
         )
         answer = f"关于“{topic}”，当前检索到的原文位置是：{locations}。原文摘录：{excerpts}"
         has_formula_content = bool(reliable_formula_anchors(query)) or any(
-            reliable_formula_anchors(result_evidence_text(result)) for result in relevant_results
+            known_formula_terms_in_evidence(result_evidence_text(result)) for result in relevant_results
         )
         safety_notice = (
             with_formula_dosage_safety("这是原文出处定位和课程整理，不是个人用药建议。")
