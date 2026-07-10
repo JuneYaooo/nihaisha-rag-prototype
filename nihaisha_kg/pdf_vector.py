@@ -239,6 +239,12 @@ KNOWN_FORMULA_ANCHORS = frozenset(
         "麦门冬汤", "木防己汤", "百合知母汤", "五苓散", "肾气丸", "麻子仁丸",
     }
 )
+FORMULA_LEFT_QUERY_PREFIXES = ("请问", "关于", "查询", "和", "与", "、")
+FORMULA_RIGHT_QUERY_SUFFIXES = (
+    "的出处", "出处", "原文", "哪本书", "哪一页", "方证", "主治", "对应",
+    "如何", "鉴别", "比较", "区别", "和", "与", "、",
+)
+QUERY_BOUNDARY_CHARS = frozenset("，,。！？!?；;、：:（）()【】[]「」『』《》〈〉/\\|\t\r\n ")
 
 
 @dataclass(frozen=True)
@@ -2713,7 +2719,33 @@ def is_reliable_formula_anchor(formula: str) -> bool:
 
 
 def reliable_formula_anchors(query: str) -> list[str]:
-    return direct_present_terms(normalize_query_text(query), KNOWN_FORMULA_ANCHORS)
+    normalized = normalize_query_text(query)
+    occurrences: list[tuple[int, int, str]] = []
+    for formula in sorted(KNOWN_FORMULA_ANCHORS, key=lambda item: (-len(item), item)):
+        offset = normalized.find(formula)
+        while offset >= 0:
+            end = offset + len(formula)
+            left = normalized[:offset]
+            right = normalized[end:]
+            left_ok = (
+                not left
+                or left[-1] in QUERY_BOUNDARY_CHARS
+                or any(left.endswith(prefix) for prefix in FORMULA_LEFT_QUERY_PREFIXES)
+            )
+            right_ok = (
+                not right
+                or right[0] in QUERY_BOUNDARY_CHARS
+                or any(right.startswith(suffix) for suffix in FORMULA_RIGHT_QUERY_SUFFIXES)
+            )
+            if left_ok and right_ok:
+                occurrences.append((offset, end, formula))
+            offset = normalized.find(formula, offset + 1)
+    selected: list[tuple[int, int, str]] = []
+    for start, end, formula in sorted(occurrences, key=lambda item: (item[0], -len(item[2]), item[2])):
+        if any(start < kept_end and end > kept_start for kept_start, kept_end, _ in selected):
+            continue
+        selected.append((start, end, formula))
+    return [formula for _, _, formula in selected]
 
 
 def reliable_source_anchors(query: str) -> list[str]:

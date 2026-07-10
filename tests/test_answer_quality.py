@@ -47,6 +47,29 @@ class AnswerQualityTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertEqual(pdf_vector.reliable_source_anchors(f"{phrase}出处"), [])
 
+    def test_reliable_formula_anchors_require_query_boundaries(self) -> None:
+        for query in ("桂枝汤圆出处", "大承气汤锅出处", "五苓散装产品出处", "肾气丸子出处"):
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_formula_anchors(query), [])
+                self.assertEqual(pdf_vector.synthesize_pdf_rag_answer(query, [])["safety_notice"], "")
+
+        positives = {
+            "桂枝汤出处": ["桂枝汤"],
+            "请问桂枝汤的出处": ["桂枝汤"],
+            "关于大承气汤原文": ["大承气汤"],
+            "桂枝汤和麻黄汤如何鉴别": ["桂枝汤", "麻黄汤"],
+        }
+        for query, expected in positives.items():
+            with self.subTest(query=query):
+                self.assertEqual(pdf_vector.reliable_formula_anchors(query), expected)
+
+    def test_embedded_product_formula_phrase_does_not_hard_filter(self) -> None:
+        candidate = result("课程资料提到日常产品名称。")
+
+        filtered = pdf_vector.filter_results_for_intent("桂枝汤圆出处", "source_lookup", [candidate])
+
+        self.assertEqual(filtered, [candidate])
+
     def test_food_source_query_does_not_receive_formula_safety_warning(self) -> None:
         answer = pdf_vector.synthesize_pdf_rag_answer("白米汤出处", [])
 
