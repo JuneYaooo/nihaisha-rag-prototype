@@ -111,6 +111,80 @@ class NormalizationTests(unittest.TestCase):
 
         self.assertEqual(terms, ["方证", "方證"])
 
+    def test_traditional_scaffold_and_generic_vocabulary_normalizes_completely(self) -> None:
+        cases = (
+            ("請問", "请问"),
+            ("告訴我", "告诉我"),
+            ("對應", "对应"),
+            ("應該用", "应该用"),
+            ("課程裡", "课程里"),
+            ("課程裏", "课程里"),
+            ("這個", "这个"),
+            ("問題", "问题"),
+            ("資料", "资料"),
+            ("內容", "内容"),
+            ("什麼嗎", "什么吗"),
+        )
+        traditional_characters = set("請問訴對應該課這個題資內嗎裏裡")
+
+        for traditional, simplified in cases:
+            with self.subTest(traditional=traditional):
+                normalized = normalize_query_text(traditional)
+
+                self.assertEqual(normalized, simplified)
+                self.assertTrue(traditional_characters.isdisjoint(normalized))
+
+    def test_paired_script_questions_remove_equivalent_scaffold(self) -> None:
+        cases = (
+            (
+                "手足厥冷应该用什么方？",
+                "手足厥冷應該用什麼方？",
+                (),
+                ["手足厥冷"],
+            ),
+            (
+                "这个问题的内容是什么吗？",
+                "這個問題的內容是什麼嗎？",
+                (),
+                [],
+            ),
+            (
+                "课程里太阳病的原文？",
+                "課程裡太陽病的原文？",
+                ("太阳病", "太阳"),
+                ["太阳病", "太陽病"],
+            ),
+        )
+
+        for simplified, traditional, domain_terms, expected in cases:
+            with self.subTest(query=simplified):
+                self.assertEqual(
+                    lexical_query_terms(simplified, domain_terms=domain_terms),
+                    expected,
+                )
+                self.assertEqual(
+                    lexical_query_terms(traditional, domain_terms=domain_terms),
+                    expected,
+                )
+
+    def test_complete_term_list_is_bounded_after_priority_ordering(self) -> None:
+        query = "太阳病 " + " ".join(f"token{index:04d}" for index in range(1001))
+
+        first = lexical_query_terms(
+            query,
+            domain_terms=("太阳病", "太阳"),
+            max_terms=8,
+        )
+        second = lexical_query_terms(
+            query,
+            domain_terms=("太阳病", "太阳"),
+            max_terms=8,
+        )
+
+        self.assertEqual(len(first), 8)
+        self.assertEqual(first, second)
+        self.assertEqual(first[:4], ["太阳病", "太陽病", "token0000", "token0001"])
+
 
 if __name__ == "__main__":
     unittest.main()

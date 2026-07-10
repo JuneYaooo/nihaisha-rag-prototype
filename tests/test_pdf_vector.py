@@ -1238,6 +1238,51 @@ class PdfVectorTests(unittest.TestCase):
                     self.assertEqual(results[0]["paragraph_id"], expected_id)
                     self.assertIn(expected_anchor, results[0]["matched_text_terms"])
 
+    def test_text_search_bounds_large_ascii_query_without_sqlite_error(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-bounded-query",
+            doc_id="doc",
+            source_path="/tmp/bounded.pdf",
+            title="手足厥冷",
+            page_start=1,
+            page_end=1,
+            text="手足厥冷时可辨证选方。needleanchor",
+        )
+        oversized_query = "needleanchor " + " ".join(
+            f"token{index:04d}" for index in range(1001)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+
+            results = store.search_text(oversized_query, limit=2)
+
+        self.assertTrue(results)
+        self.assertEqual(results[0]["paragraph_id"], "p-bounded-query")
+
+    def test_traditional_question_scaffold_retrieves_simplified_paragraph(self) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-simplified-cold-limbs",
+            doc_id="doc",
+            source_path="/tmp/simplified-cold-limbs.pdf",
+            title="手足厥冷",
+            page_start=1,
+            page_end=1,
+            text="手足厥冷时应辨证选方。",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+
+            results = store.search_text("手足厥冷應該用什麼方？", limit=2)
+
+        self.assertTrue(results)
+        self.assertEqual(results[0]["paragraph_id"], "p-simplified-cold-limbs")
+
     def test_hybrid_search_combines_vector_and_text_sources(self) -> None:
         paragraph_a = ParsedParagraph(
             paragraph_id="p-a",

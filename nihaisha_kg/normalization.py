@@ -56,6 +56,19 @@ _TRADITIONAL_TO_SIMPLIFIED = {
     "區": "区",
     "於": "于",
     "應": "应",
+    "請": "请",
+    "問": "问",
+    "訴": "诉",
+    "對": "对",
+    "該": "该",
+    "課": "课",
+    "這": "这",
+    "個": "个",
+    "題": "题",
+    "資": "资",
+    "內": "内",
+    "嗎": "吗",
+    "裏": "里",
 }
 
 TRADITIONAL_QUERY_TRANSLATION = str.maketrans(_TRADITIONAL_TO_SIMPLIFIED)
@@ -184,6 +197,7 @@ def lexical_query_terms(
     query: str,
     domain_terms: Iterable[str] = (),
     max_fallback_terms: int = 12,
+    max_terms: int = 64,
 ) -> list[str]:
     normalized = normalize_query_text(query)
     recognized, recognized_spans, removal_spans = _select_recognized_terms(
@@ -244,7 +258,7 @@ def lexical_query_terms(
         if len(fallback_terms) >= fallback_limit:
             break
 
-    return _dedupe_keep_order(
+    terms = _dedupe_keep_order(
         [
             *recognized,
             *recognized_variants,
@@ -254,3 +268,4 @@ def lexical_query_terms(
             *fallback_terms,
         ]
     )
+    return terms[: max(0, max_terms)]

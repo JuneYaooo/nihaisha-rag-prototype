@@ -293,14 +293,22 @@ Also verify:
 - `太阳病` suppresses a nested-only `太阳`, while an independent `太阳` occurrence is retained.
 - no fallback contains `什么/哪些/这个/那个/问题/资料/内容/时候`.
 - a zero fallback budget retains domain and script variants but no fallback terms.
+- simplified/traditional pairs for `手足厥冷应该用什么方？`, generic-only question glue, and
+  `课程里太阳病的原文？` produce equivalent content terms without scaffold leakage.
+- every traditional character used by scaffold, generic-fragment, and trailing-particle vocabulary
+  normalizes completely.
+- more than 1,000 ASCII tokens produce at most `max_terms`, with domain/script anchors first.
 - `text_search_terms` and `knowledge_search_terms` expose the same boundary-preserving behavior.
 - a real temporary `LocalVectorStore` retrieves a traditional-only `太陽病/脈證` paragraph from a simplified query and a simplified-only `少阴病/脉证` paragraph from a traditional query.
+- live SQLite text search handles more than 1,000 ASCII query tokens without `OperationalError`, and
+  `手足厥冷應該用什麼方？` retrieves a simplified-only content paragraph.
 
 - [ ] **Step 2: Run the tests and verify the rejected behavior fails**
 
 Run the helper, delegation, and real SQLite retrieval tests before changing production code. Expected
-failures must show the four root causes: normalized-only terms, concatenation after global replacement,
-generic-glue trigrams, and redundant substring domain anchors.
+failures must show the root causes: normalized-only terms, incomplete traditional scaffold coverage,
+concatenation after global replacement, generic-glue trigrams, redundant substring domain anchors, and
+an unbounded complete term list that exceeds SQLite expression limits.
 
 - [ ] **Step 3: Implement dual-script, boundary-preserving lexical terms**
 
@@ -318,7 +326,9 @@ _TRADITIONAL_TO_SIMPLIFIED = {
     "實": "实", "風": "风", "濕": "湿", "為": "为", "歸": "归",
     "屬": "属", "開": "开", "關": "关", "體": "体", "現": "现",
     "歲": "岁", "調": "调", "較": "较", "區": "区", "於": "于",
-    "應": "应",
+    "應": "应", "請": "请", "問": "问", "訴": "诉", "對": "对",
+    "該": "该", "課": "课", "這": "这", "個": "个", "題": "题",
+    "資": "资", "內": "内", "嗎": "吗", "裏": "里",
 }
 TRADITIONAL_QUERY_TRANSLATION = str.maketrans(_TRADITIONAL_TO_SIMPLIFIED)
 _SIMPLIFIED_QUERY_TRANSLATION = str.maketrans(
@@ -344,7 +354,9 @@ The implementation must then:
    boundaries in both aligned query variants, then normalize whitespace;
 5. never globally delete `和/与/从/到/的`; only trim trailing `的/了/呢/吗` from a standalone fallback;
 6. emit CJK chunks of at most eight characters or overlapping trigrams, interleaving script variants,
-   rejecting any candidate containing generic glue, and bounding the total fallback output only.
+   rejecting any candidate containing generic glue, with `max_fallback_terms=12` as the fallback budget;
+7. deduplicate the complete priority-ordered sequence—domain/script anchors, measures, ASCII, then
+   fallback—and cap the final return value with `max_terms=64`.
 
 - [ ] **Step 4: Delegate existing search-term functions**
 
@@ -387,7 +399,7 @@ Remove the old `TRADITIONAL_QUERY_TRANSLATION` constant and local `normalize_que
 Run:
 
 ```bash
-python3 -m unittest tests.test_normalization tests.test_pdf_vector.PdfVectorTests.test_search_term_apis_delegate_to_boundary_preserving_normalization tests.test_pdf_vector.PdfVectorTests.test_text_search_retrieves_across_traditional_and_simplified_scripts tests.test_pdf_vector.PdfVectorTests.test_text_search_returns_exact_original_paragraph_without_embedding -v
+python3 -m unittest tests.test_normalization tests.test_pdf_vector.PdfVectorTests.test_search_term_apis_delegate_to_boundary_preserving_normalization tests.test_pdf_vector.PdfVectorTests.test_text_search_retrieves_across_traditional_and_simplified_scripts tests.test_pdf_vector.PdfVectorTests.test_text_search_bounds_large_ascii_query_without_sqlite_error tests.test_pdf_vector.PdfVectorTests.test_traditional_question_scaffold_retrieves_simplified_paragraph tests.test_pdf_vector.PdfVectorTests.test_text_search_returns_exact_original_paragraph_without_embedding -v
 ```
 
 Expected: all selected helper, delegation, cross-script SQLite retrieval, and compatibility tests pass.
@@ -396,7 +408,7 @@ Expected: all selected helper, delegation, cross-script SQLite retrieval, and co
 
 ```bash
 git add nihaisha_kg/normalization.py nihaisha_kg/pdf_vector.py tests/test_normalization.py tests/test_pdf_vector.py
-git commit -m "fix: preserve Chinese lexical query meaning"
+git commit -m "fix: bound multilingual lexical queries"
 ```
 
 ## Task 3: Remove Hard-Coded Answer Content
