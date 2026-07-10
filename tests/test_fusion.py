@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import unittest
 
-from nihaisha_kg.fusion import fuse_ranked_channels
+from nihaisha_kg.fusion import fuse_ranked_channels, merge_unique
 
 
 def hit(paragraph_id: str, raw_score: float, source: str) -> dict[str, object]:
@@ -23,6 +23,16 @@ def hit(paragraph_id: str, raw_score: float, source: str) -> dict[str, object]:
 
 
 class FusionTests(unittest.TestCase):
+    def test_merge_unique_handles_nested_json_values_in_stable_order(self) -> None:
+        left = [{"b": [2, 1], "a": "值"}, "桂枝"]
+
+        merged = merge_unique(
+            left,
+            [{"a": "值", "b": [2, 1]}, ["nested", {"x": 1}], "桂枝"],
+        )
+
+        self.assertEqual(merged, [left[0], "桂枝", ["nested", {"x": 1}]])
+
     def test_cross_channel_rank_beats_incomparable_single_channel_raw_scores(self) -> None:
         shared_vector = hit("shared", 0.2, "vector")
         shared_text = hit("shared", 0.1, "text")

@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 
-def _merge_unique(left: list[object], right: Sequence[object]) -> list[object]:
+def merge_unique(left: list[object], right: Sequence[object]) -> list[object]:
     seen = {json.dumps(value, ensure_ascii=False, sort_keys=True) for value in left}
     merged = list(left)
     for value in right:
@@ -71,10 +71,10 @@ def fuse_ranked_channels(
             sources = list(current["retrieval_sources"])
             current["retrieval_sources"] = sorted(
                 str(source)
-                for source in _merge_unique(sources, list(result.get("retrieval_sources", [channel])))
+                for source in merge_unique(sources, list(result.get("retrieval_sources", [channel])))
             )
             for field in merge_fields:
-                current[field] = _merge_unique(
+                current[field] = merge_unique(
                     list(current[field]),
                     list(result.get(field, [])),
                 )

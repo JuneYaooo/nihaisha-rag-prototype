@@ -690,7 +690,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 
-def _merge_unique(left: list[object], right: Sequence[object]) -> list[object]:
+def merge_unique(left: list[object], right: Sequence[object]) -> list[object]:
     seen = {json.dumps(value, ensure_ascii=False, sort_keys=True) for value in left}
     merged = list(left)
     for value in right:
@@ -739,7 +739,7 @@ def fuse_ranked_channels(
                 set(current["retrieval_sources"]) | set(result.get("retrieval_sources", [channel]))
             )
             for field in ("matched_units", "matched_knowledge_units", "matched_text_terms", "unit_types"):
-                current[field] = _merge_unique(list(current[field]), list(result.get(field, [])))
+                current[field] = merge_unique(list(current[field]), list(result.get(field, [])))
             for score_field in ("vector_score", "text_score", "knowledge_score"):
                 if score_field in result:
                     current[score_field] = max(
@@ -773,7 +773,7 @@ Import `fuse_ranked_channels` in `pdf_vector.py`. Replace the current `combined`
         )
 ```
 
-Rename the separate cross-query fusion layer to `fuse_query_rewrites` and store its score in `query_fusion_score`, while preserving each channel-level `fusion_score` and `channel_ranks`. For hybrid mode, do not perform a second knowledge lookup in `run_query_plan_search`, because `search_hybrid` already includes that channel.
+Rename the separate cross-query fusion layer to `fuse_query_rewrites` and store its score in `query_fusion_score`, while preserving each channel-level `fusion_score` and `channel_ranks`. Each paragraph contributes at most once per rewrite, using its first/best rank, while later duplicate occurrences are still inspected for representative selection and merged diagnostics. Select one representative occurrence by highest input `score`, then earliest rewrite/rank, and copy its channel diagnostics atomically; aggregate only query RRF and stable-deduplicated list diagnostics. Add a bounded `rewrite_observations` trace, return empty for nonpositive limits, and sort ties explicitly by paragraph ID. For hybrid mode, do not perform a second knowledge lookup in `run_query_plan_search`, because `search_hybrid` already includes that channel.
 
 - [ ] **Step 5: Run fusion and hybrid regression tests**
 
@@ -784,7 +784,7 @@ python3 -m unittest \
   tests.test_fusion \
   tests.test_pdf_vector.PdfVectorTests.test_hybrid_search_combines_vector_and_text_sources \
   tests.test_pdf_vector.PdfVectorTests.test_hybrid_search_includes_grounded_knowledge_units \
-  tests.test_pdf_vector.PdfVectorTests.test_fuse_query_rewrites_promotes_shared_results_without_overwriting_channel_fusion \
+  tests.test_pdf_vector.PdfVectorTests.test_fuse_query_rewrites_selects_one_atomic_representative_observation \
   -v
 ```
 

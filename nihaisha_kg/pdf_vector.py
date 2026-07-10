@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .fusion import fuse_ranked_channels
+from .fusion import fuse_ranked_channels, merge_unique
 from .normalization import lexical_query_terms, normalize_query_text
 
 
@@ -2949,60 +2950,100 @@ def fuse_query_rewrites(
     limit: int,
     rank_constant: int = 60,
 ) -> list[dict[str, object]]:
+    if limit <= 0:
+        return []
+
+    max_observations = 16
+    merge_fields = (
+        "matched_units",
+        "matched_knowledge_units",
+        "matched_text_terms",
+        "unit_types",
+    )
     fused: dict[str, dict[str, object]] = {}
-    for results in result_sets:
+    for rewrite_index, results in enumerate(result_sets, start=1):
+        seen_paragraph_ids: set[str] = set()
         for rank, result in enumerate(results, start=1):
             paragraph_id = str(result.get("paragraph_id", ""))
             if not paragraph_id:
                 continue
+            contributes_to_query_fusion = paragraph_id not in seen_paragraph_ids
+            if contributes_to_query_fusion:
+                seen_paragraph_ids.add(paragraph_id)
+
             rrf_increment = 1.0 / (rank_constant + rank)
+            raw_score = float(result.get("score", 0.0))
+            representative_key = (raw_score, -rewrite_index, -rank)
+            observation: dict[str, object] = {
+                "rewrite_index": rewrite_index,
+                "rank": rank,
+                "raw_score": raw_score,
+            }
+            for field in ("fusion_score", "channel_ranks"):
+                if field in result:
+                    observation[field] = copy.deepcopy(result[field])
+
             current = fused.get(paragraph_id)
             if current is None:
-                item = dict(result)
-                item["raw_score"] = float(result.get("score", 0.0))
-                item["query_fusion_score"] = rrf_increment
-                item["score"] = rrf_increment
-                item["retrieval_sources"] = sorted(set(item.get("retrieval_sources", [])))
-                item["matched_knowledge_units"] = list(item.get("matched_knowledge_units", []))
-                item["matched_units"] = list(item.get("matched_units", []))
-                fused[paragraph_id] = item
-                continue
+                current = {
+                    "representative": copy.deepcopy(result),
+                    "representative_key": representative_key,
+                    "query_fusion_score": 0.0,
+                    "retrieval_sources": [],
+                    "rewrite_observations": [],
+                    "rewrite_observation_count": 0,
+                }
+                for field in merge_fields:
+                    current[field] = []
+                fused[paragraph_id] = current
+            elif representative_key > current["representative_key"]:
+                current["representative"] = copy.deepcopy(result)
+                current["representative_key"] = representative_key
 
-            current["raw_score"] = max(
-                float(current.get("raw_score", current.get("score", 0.0))),
-                float(result.get("score", 0.0)),
-            )
-            current["query_fusion_score"] = (
-                float(current.get("query_fusion_score", 0.0)) + rrf_increment
-            )
-            current["score"] = float(current["query_fusion_score"])
-            current["vector_score"] = max(
-                float(current.get("vector_score", 0.0)),
-                float(result.get("vector_score", 0.0)),
-            )
-            current["text_score"] = max(
-                float(current.get("text_score", 0.0)),
-                float(result.get("text_score", 0.0)),
-            )
-            current["knowledge_score"] = max(
-                float(current.get("knowledge_score", 0.0)),
-                float(result.get("knowledge_score", 0.0)),
-            )
-            sources = set(current.get("retrieval_sources", []))
-            sources.update(result.get("retrieval_sources", []))
-            current["retrieval_sources"] = sorted(sources)
-            current.setdefault("matched_knowledge_units", [])
-            current["matched_knowledge_units"].extend(result.get("matched_knowledge_units", []))
-            current.setdefault("matched_units", [])
-            current["matched_units"].extend(result.get("matched_units", []))
+            if contributes_to_query_fusion:
+                current["query_fusion_score"] = (
+                    float(current["query_fusion_score"]) + rrf_increment
+                )
+            current["rewrite_observation_count"] = int(current["rewrite_observation_count"]) + 1
+            observations = current["rewrite_observations"]
+            assert isinstance(observations, list)
+            if len(observations) < max_observations:
+                observations.append(observation)
+            elif representative_key == current["representative_key"]:
+                observations[-1] = observation
 
-    ranked = sorted(
-        fused.values(),
+            current["retrieval_sources"] = merge_unique(
+                list(current["retrieval_sources"]),
+                list(result.get("retrieval_sources", [])),
+            )
+            for field in merge_fields:
+                current[field] = merge_unique(
+                    list(current[field]),
+                    list(result.get(field, [])),
+                )
+
+    ranked: list[dict[str, object]] = []
+    for paragraph_id, state in fused.items():
+        representative = state["representative"]
+        assert isinstance(representative, dict)
+        item = copy.deepcopy(representative)
+        item["raw_score"] = float(representative.get("score", 0.0))
+        item["query_fusion_score"] = float(state["query_fusion_score"])
+        item["score"] = item["query_fusion_score"]
+        item["retrieval_sources"] = sorted(str(source) for source in state["retrieval_sources"])
+        for field in merge_fields:
+            item[field] = copy.deepcopy(state[field])
+        item["rewrite_observations"] = copy.deepcopy(state["rewrite_observations"])
+        item["rewrite_observation_count"] = int(state["rewrite_observation_count"])
+        item["paragraph_id"] = paragraph_id
+        ranked.append(item)
+
+    ranked.sort(
         key=lambda item: (
-            float(item.get("query_fusion_score", 0.0)),
-            float(item.get("raw_score", 0.0)),
+            -float(item.get("query_fusion_score", 0.0)),
+            -float(item.get("raw_score", 0.0)),
+            str(item.get("paragraph_id", "")),
         ),
-        reverse=True,
     )
     return ranked[:limit]
 

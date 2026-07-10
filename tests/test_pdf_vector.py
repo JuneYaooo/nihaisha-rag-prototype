@@ -742,12 +742,13 @@ class PdfVectorTests(unittest.TestCase):
         self.assertLessEqual(len(plan), 2)
         self.assertIn(query, plan)
 
-    def test_fuse_query_rewrites_promotes_shared_results_without_overwriting_channel_fusion(self) -> None:
+    def test_fuse_query_rewrites_selects_one_atomic_representative_observation(self) -> None:
         result_a = {
             "paragraph_id": "p-a",
             "score": 10.0,
             "fusion_score": 0.03,
             "channel_ranks": {"text": 1},
+            "raw_channel_scores": {"text": 10.0},
             "vector_score": 0.0,
             "text_score": 10.0,
             "knowledge_score": 0.0,
@@ -760,6 +761,7 @@ class PdfVectorTests(unittest.TestCase):
             "score": 1.0,
             "fusion_score": 0.02,
             "channel_ranks": {"text": 2, "vector": 3},
+            "raw_channel_scores": {"text": 1.0, "vector": 0.5},
             "vector_score": 0.0,
             "text_score": 1.0,
             "knowledge_score": 0.0,
@@ -767,7 +769,19 @@ class PdfVectorTests(unittest.TestCase):
             "matched_knowledge_units": [],
             "matched_units": [],
         }
-        result_b_high_second = dict(result_b_low_first, score=8.0, text_score=8.0)
+        result_b_high_second = {
+            **result_b_low_first,
+            "score": 8.0,
+            "fusion_score": 0.04,
+            "channel_ranks": {"knowledge": 1, "vector": 2},
+            "raw_channel_scores": {"knowledge": 800.0, "vector": 0.8},
+            "vector_score": 0.8,
+            "text_score": 0.0,
+            "knowledge_score": 800.0,
+            "retrieval_sources": ["knowledge", "vector"],
+            "matched_knowledge_units": [{"id": "ku-1"}],
+            "matched_units": [{"id": "unit-1"}],
+        }
 
         fused = fuse_query_rewrites(
             [
@@ -780,9 +794,107 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertEqual(fused[0]["paragraph_id"], "p-b")
         self.assertEqual(fused[0]["score"], fused[0]["query_fusion_score"])
-        self.assertEqual(fused[0]["fusion_score"], 0.02)
-        self.assertEqual(fused[0]["channel_ranks"], {"text": 2, "vector": 3})
+        self.assertAlmostEqual(fused[0]["query_fusion_score"], 1 / 12 + 1 / 11)
+        self.assertEqual(fused[0]["fusion_score"], 0.04)
+        self.assertEqual(fused[0]["channel_ranks"], {"knowledge": 1, "vector": 2})
+        self.assertEqual(fused[0]["raw_channel_scores"], {"knowledge": 800.0, "vector": 0.8})
+        self.assertEqual(fused[0]["vector_score"], 0.8)
+        self.assertEqual(fused[0]["text_score"], 0.0)
+        self.assertEqual(fused[0]["knowledge_score"], 800.0)
         self.assertEqual(fused[0]["raw_score"], 8.0)
+        self.assertEqual(
+            fused[0]["rewrite_observations"],
+            [
+                {
+                    "rewrite_index": 1,
+                    "rank": 2,
+                    "raw_score": 1.0,
+                    "fusion_score": 0.02,
+                    "channel_ranks": {"text": 2, "vector": 3},
+                },
+                {
+                    "rewrite_index": 2,
+                    "rank": 1,
+                    "raw_score": 8.0,
+                    "fusion_score": 0.04,
+                    "channel_ranks": {"knowledge": 1, "vector": 2},
+                },
+            ],
+        )
+
+    def test_fuse_query_rewrites_counts_duplicate_once_but_inspects_it_for_representative(self) -> None:
+        first = {
+            "paragraph_id": "p-a",
+            "score": 2.0,
+            "fusion_score": 0.02,
+            "channel_ranks": {"text": 1},
+            "matched_units": [{"id": "first"}],
+        }
+        duplicate = {
+            "paragraph_id": "p-a",
+            "score": 999.0,
+            "fusion_score": 0.99,
+            "channel_ranks": {"knowledge": 1},
+            "matched_units": [{"id": "duplicate"}],
+        }
+
+        fused = fuse_query_rewrites([[first, duplicate]], limit=1, rank_constant=10)
+
+        self.assertAlmostEqual(fused[0]["query_fusion_score"], 1 / 11)
+        self.assertEqual(fused[0]["raw_score"], 999.0)
+        self.assertEqual(fused[0]["fusion_score"], 0.99)
+        self.assertEqual(fused[0]["channel_ranks"], {"knowledge": 1})
+        self.assertEqual(fused[0]["matched_units"], [{"id": "first"}, {"id": "duplicate"}])
+        self.assertEqual(len(fused[0]["rewrite_observations"]), 2)
+
+    def test_fuse_query_rewrites_deduplicates_merged_list_diagnostics(self) -> None:
+        shared_unit = {"id": "unit-1", "payload": ["桂枝", {"x": 1}]}
+        first = {
+            "paragraph_id": "p-a",
+            "score": 2.0,
+            "retrieval_sources": ["text"],
+            "matched_units": [shared_unit],
+            "matched_knowledge_units": [{"id": "ku-1"}],
+            "matched_text_terms": ["桂枝"],
+            "unit_types": ["formula"],
+        }
+        second = {
+            **first,
+            "score": 1.0,
+            "retrieval_sources": ["knowledge", "text"],
+            "matched_units": [dict(shared_unit), {"id": "unit-2"}],
+            "matched_knowledge_units": [{"id": "ku-1"}, {"id": "ku-2"}],
+            "matched_text_terms": ["桂枝", "麻黄"],
+            "unit_types": ["formula", "clinical"],
+        }
+
+        fused = fuse_query_rewrites([[first], [second]], limit=1)
+
+        self.assertEqual(fused[0]["retrieval_sources"], ["knowledge", "text"])
+        self.assertEqual(fused[0]["matched_units"], [shared_unit, {"id": "unit-2"}])
+        self.assertEqual(fused[0]["matched_knowledge_units"], [{"id": "ku-1"}, {"id": "ku-2"}])
+        self.assertEqual(fused[0]["matched_text_terms"], ["桂枝", "麻黄"])
+        self.assertEqual(fused[0]["unit_types"], ["formula", "clinical"])
+
+    def test_fuse_query_rewrites_has_stable_ties_and_nonpositive_limits(self) -> None:
+        p_a = {"paragraph_id": "p-a", "score": 1.0}
+        p_b = {"paragraph_id": "p-b", "score": 1.0}
+
+        first_order = fuse_query_rewrites([[p_b], [p_a]], limit=2)
+        second_order = fuse_query_rewrites([[p_a], [p_b]], limit=2)
+
+        self.assertEqual([item["paragraph_id"] for item in first_order], ["p-a", "p-b"])
+        self.assertEqual([item["paragraph_id"] for item in second_order], ["p-a", "p-b"])
+        self.assertEqual(fuse_query_rewrites([[p_a]], limit=0), [])
+        self.assertEqual(fuse_query_rewrites([[p_a]], limit=-1), [])
+
+    def test_fuse_query_rewrites_bounds_observation_trace(self) -> None:
+        result_sets = [[{"paragraph_id": "p-a", "score": float(index)}] for index in range(20)]
+
+        fused = fuse_query_rewrites(result_sets, limit=1)
+
+        self.assertEqual(fused[0]["rewrite_observation_count"], 20)
+        self.assertLessEqual(len(fused[0]["rewrite_observations"]), 16)
 
     def test_run_query_plan_search_executes_distinct_queries_and_fuses_results(self) -> None:
         class FakeStore:
