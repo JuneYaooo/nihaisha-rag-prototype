@@ -19,30 +19,63 @@ class EvalCase:
 def load_eval_cases(path: Path) -> list[EvalCase]:
     required_fields = ("case_id", "query", "task_type", "relevant_paragraph_ids")
     cases: list[EvalCase] = []
+    seen_case_ids: set[str] = set()
 
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
-            row = json.loads(line)
+            location = f"{path}:{line_number}:"
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{location} invalid JSON: {exc.msg}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"{location} evaluation row must be a JSON object")
             missing_fields = [field for field in required_fields if field not in row]
             if missing_fields:
                 missing = ", ".join(missing_fields)
-                raise ValueError(f"{path}:{line_number}: missing required field(s): {missing}")
+                raise ValueError(f"{location} missing required field(s): {missing}")
+
+            for field in ("case_id", "query", "task_type"):
+                value = row[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{location} {field} must be a non-empty string")
+
+            relevant_ids = row["relevant_paragraph_ids"]
+            forbidden_ids = row.get("forbidden_paragraph_ids", [])
+            for field, values in (
+                ("relevant_paragraph_ids", relevant_ids),
+                ("forbidden_paragraph_ids", forbidden_ids),
+            ):
+                if not isinstance(values, list):
+                    raise ValueError(f"{location} {field} must be a JSON array")
+                if any(not isinstance(value, str) or not value.strip() for value in values):
+                    raise ValueError(f"{location} {field} must contain non-empty strings")
+                if len(values) != len(set(values)):
+                    raise ValueError(f"{location} {field} must not contain duplicate IDs")
+
+            if not relevant_ids:
+                raise ValueError(f"{location} relevant_paragraph_ids must not be empty")
+            if set(relevant_ids) & set(forbidden_ids):
+                raise ValueError(f"{location} relevant and forbidden paragraph IDs must not overlap")
+
+            case_id = row["case_id"]
+            if case_id in seen_case_ids:
+                raise ValueError(f"{location} duplicate case_id: {case_id}")
+            seen_case_ids.add(case_id)
             cases.append(
                 EvalCase(
-                    case_id=str(row["case_id"]),
-                    query=str(row["query"]),
-                    task_type=str(row["task_type"]),
-                    relevant_paragraph_ids=tuple(str(value) for value in row["relevant_paragraph_ids"]),
-                    forbidden_paragraph_ids=tuple(
-                        str(value) for value in row.get("forbidden_paragraph_ids", ())
-                    ),
+                    case_id=case_id,
+                    query=row["query"],
+                    task_type=row["task_type"],
+                    relevant_paragraph_ids=tuple(relevant_ids),
+                    forbidden_paragraph_ids=tuple(forbidden_ids),
                 )
             )
 
     if not cases:
-        raise ValueError(f"{path}: evaluation file is empty")
+        raise ValueError(f"{path}:1: evaluation file is empty")
     return cases
 
 
@@ -62,7 +95,7 @@ def evaluate_ranked_ids(
         top_k = ranking[:k]
         relevant_hits = sum(paragraph_id in relevant for paragraph_id in top_k)
         metrics[f"hit_at_{k}"] = float(relevant_hits > 0)
-        metrics[f"recall_at_{k}"] = relevant_hits / len(relevant) if relevant else 0.0
+        metrics[f"recall_at_{k}"] = relevant_hits / len(relevant) if relevant else 1.0
         metrics[f"forbidden_hits_at_{k}"] = float(
             sum(paragraph_id in forbidden for paragraph_id in top_k)
         )
@@ -75,7 +108,7 @@ def evaluate_ranked_ids(
                 precision_sum += hits_through_rank / rank
         precision_denominator = min(len(relevant), k)
         metrics[f"context_precision_at_{k}"] = (
-            precision_sum / precision_denominator if precision_denominator else 0.0
+            precision_sum / precision_denominator if precision_denominator else 1.0
         )
 
         discounted_gain = sum(
@@ -87,7 +120,7 @@ def evaluate_ranked_ids(
             1.0 / math.log2(rank + 1)
             for rank in range(1, min(len(relevant), k) + 1)
         )
-        metrics[f"ndcg_at_{k}"] = discounted_gain / ideal_gain if ideal_gain else 0.0
+        metrics[f"ndcg_at_{k}"] = discounted_gain / ideal_gain if ideal_gain else 1.0
 
     metrics["reciprocal_rank"] = next(
         (
@@ -101,10 +134,11 @@ def evaluate_ranked_ids(
 
 
 def aggregate_metrics(rows: Iterable[Mapping[str, float]]) -> dict[str, float]:
+    rows = list(rows)
+    if not rows:
+        return {}
     totals: dict[str, float] = {}
-    counts: dict[str, int] = {}
     for row in rows:
         for key, value in row.items():
             totals[key] = totals.get(key, 0.0) + float(value)
-            counts[key] = counts.get(key, 0) + 1
-    return {key: totals[key] / counts[key] for key in sorted(totals)}
+    return {key: totals[key] / len(rows) for key in sorted(totals)}
