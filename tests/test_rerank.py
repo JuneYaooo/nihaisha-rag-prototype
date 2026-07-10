@@ -39,7 +39,7 @@ class FakeSession:
 
 
 class RerankTests(unittest.TestCase):
-    def test_posts_documented_request_and_maps_api_order_without_mutation(self) -> None:
+    def test_posts_documented_request_and_maps_score_order_without_mutation(self) -> None:
         session = FakeSession(
             {
                 "results": [
@@ -79,6 +79,28 @@ class RerankTests(unittest.TestCase):
             },
         )
         self.assertEqual(timeout, 60)
+
+    def test_unsorted_response_is_ranked_by_score_with_original_index_ties(self) -> None:
+        session = FakeSession(
+            {
+                "results": [
+                    {"index": 2, "relevance_score": 0.4},
+                    {"index": 1, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.9},
+                ]
+            }
+        )
+        backend = SiliconFlowReranker(api_key="secret", session=session, max_retries=1)
+        candidates = [
+            {"paragraph_id": "p0", "text": "甲"},
+            {"paragraph_id": "p1", "text": "乙"},
+            {"paragraph_id": "p2", "text": "丙"},
+        ]
+
+        outcome = backend.rerank("问题", candidates, limit=2)
+
+        self.assertEqual([row["paragraph_id"] for row in outcome.results], ["p0", "p1"])
+        self.assertEqual([row["rerank_score"] for row in outcome.results], [0.9, 0.9])
 
     def test_blank_documents_are_omitted_and_response_indices_map_to_original_candidates(self) -> None:
         session = FakeSession({"results": [{"index": 1, "relevance_score": 0.8}]})
@@ -197,6 +219,44 @@ class RerankTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     SiliconFlowReranker(api_key="secret", session=session, **kwargs)
         self.assertEqual(session.calls, [])
+
+    def test_constructor_rejects_invalid_resolved_strings_and_numeric_options(self) -> None:
+        invalid_cases = [
+            ("whitespace key", {"api_key": " "}, RuntimeError, "SILICONFLOW_API_KEY"),
+            ("non-string key", {"api_key": 123}, ValueError, "api_key"),
+            ("whitespace model", {"api_key": "key", "model": " "}, ValueError, "model"),
+            ("non-string model", {"api_key": "key", "model": 123}, ValueError, "model"),
+            ("whitespace url", {"api_key": "key", "base_url": " "}, ValueError, "base_url"),
+            ("non-string url", {"api_key": "key", "base_url": 123}, ValueError, "base_url"),
+            ("relative url", {"api_key": "key", "base_url": "/v1"}, ValueError, "base_url"),
+            ("invalid scheme", {"api_key": "key", "base_url": "ftp://host/v1"}, ValueError, "base_url"),
+            ("missing host", {"api_key": "key", "base_url": "https:///v1"}, ValueError, "base_url"),
+            ("boolean timeout", {"api_key": "key", "timeout": True}, ValueError, "timeout"),
+            ("zero timeout", {"api_key": "key", "timeout": 0}, ValueError, "timeout"),
+            ("negative timeout", {"api_key": "key", "timeout": -1}, ValueError, "timeout"),
+            ("nan timeout", {"api_key": "key", "timeout": math.nan}, ValueError, "timeout"),
+            ("string timeout", {"api_key": "key", "timeout": "60"}, ValueError, "timeout"),
+            ("boolean retries", {"api_key": "key", "max_retries": True}, ValueError, "max_retries"),
+            ("zero retries", {"api_key": "key", "max_retries": 0}, ValueError, "max_retries"),
+            ("negative retries", {"api_key": "key", "max_retries": -1}, ValueError, "max_retries"),
+            ("float retries", {"api_key": "key", "max_retries": 1.5}, ValueError, "max_retries"),
+        ]
+
+        for name, kwargs, error_type, message in invalid_cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(error_type, message):
+                    SiliconFlowReranker(**kwargs)
+
+    def test_constructor_strips_valid_strings_and_trailing_url_slash(self) -> None:
+        backend = SiliconFlowReranker(
+            api_key=" key ",
+            model=" model ",
+            base_url=" https://example.test/v1/ ",
+        )
+
+        self.assertEqual(backend.api_key, "key")
+        self.assertEqual(backend.model, "model")
+        self.assertEqual(backend.base_url, "https://example.test/v1")
 
 
 if __name__ == "__main__":

@@ -993,6 +993,14 @@ class SiliconFlowReranker:
         )
 ```
 
+Hardening contract: validate resolved `api_key`, `model`, and `base_url` types before string
+operations; require nonempty stripped strings and an absolute HTTP(S) base URL; reject boolean,
+non-finite, or nonpositive timeout values and non-integer/nonpositive retry counts. Validate the
+complete provider result array before mapping it, then sort by descending finite relevance score
+with original candidate index as the explicit tie-break. Sanitize every adapter error through the
+shared rerank-error sanitizer, removing credentials and control characters and capping output at
+240 characters.
+
 - [x] **Step 4: Rerank once after all query rewrites**
 
 Add `reranker_backend: object | None = None`, `reranker: str = "none"`, and `rerank_model: str | None = None` to `answer_pdf_rag`. The library default is deliberately network-free; Task 7 gives the user-facing CLI its `auto` default. Validate `reranker` as one of `auto`, `none`, or `siliconflow`. After rewrite fusion and intent filtering, but before `select_diverse_results`, add:
@@ -1017,7 +1025,7 @@ Add `reranker_backend: object | None = None`, `reranker: str = "none"`, and `rer
         intent_results = rerank_outcome.results
 ```
 
-Attach only bounded, serializable rerank metadata to the answer as `{"model": ..., "degraded_feature": ..., "error": ...}`; never attach candidate documents or credentials. Task 7 can consume this metadata in its trace. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one. Existing direct answer tests pass `reranker="none"`, and orchestration tests inject a fake backend so tests never reach the network.
+Attach only bounded, serializable rerank metadata to the answer as `{"model": ..., "degraded_feature": ..., "error": ...}`; never attach candidate documents or credentials. Sanitize the error again at this public answer boundary, including injected backend outcomes, and cap it at 240 characters. Task 7 can consume this metadata in its trace. Do not rerank inside each query rewrite; the API call count for one `answer` command must be at most one. Existing direct answer tests pass `reranker="none"`, and orchestration tests inject a fake backend so tests never reach the network.
 
 - [x] **Step 5: Document environment settings**
 

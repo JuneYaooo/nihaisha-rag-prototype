@@ -6,9 +6,42 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 DEFAULT_SILICONFLOW_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+PUBLIC_RERANK_ERROR_MAX_CHARS = 240
+
+
+def sanitize_rerank_error(
+    error: object,
+    *,
+    api_key: str | None = None,
+    max_chars: int = PUBLIC_RERANK_ERROR_MAX_CHARS,
+) -> str:
+    message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(error))
+    secrets = [api_key, os.getenv("SILICONFLOW_API_KEY")]
+    for secret in secrets:
+        if isinstance(secret, str) and secret:
+            message = message.replace(secret, "[REDACTED]")
+    message = re.sub(
+        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;}\]]+",
+        "Authorization: [REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)\bbearer\s+[^\s,;}\]]+", "Bearer [REDACTED]", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{6,}\b", "[REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|token)\s*[:=]\s*[^\s,;}\]]+",
+        r"\1=[REDACTED]",
+        message,
+    )
+    message = " ".join(message.split())
+    if max_chars <= 0:
+        return ""
+    if len(message) > max_chars:
+        message = message[: max_chars - 1].rstrip() + "…"
+    return message
 
 
 @dataclass(frozen=True)
@@ -30,22 +63,55 @@ class SiliconFlowReranker:
         strict: bool = False,
         session: object | None = None,
     ) -> None:
-        configured_key = api_key if api_key is not None else os.getenv("SILICONFLOW_API_KEY", "")
-        self.api_key = configured_key.strip()
-        configured_model = model if model is not None else os.getenv("SILICONFLOW_RERANK_MODEL")
-        self.model = (configured_model or DEFAULT_SILICONFLOW_RERANK_MODEL).strip()
-        self.base_url = base_url.rstrip("/")
+        resolved_key = api_key if api_key is not None else os.getenv("SILICONFLOW_API_KEY", "")
+        if not isinstance(resolved_key, str):
+            raise ValueError("api_key must be a string")
+        normalized_key = resolved_key.strip()
+        if not normalized_key:
+            raise RuntimeError("SILICONFLOW_API_KEY is required for SiliconFlow reranking")
+
+        if model is not None:
+            resolved_model = model
+        else:
+            environment_model = os.getenv("SILICONFLOW_RERANK_MODEL")
+            resolved_model = (
+                DEFAULT_SILICONFLOW_RERANK_MODEL
+                if environment_model is None
+                else environment_model
+            )
+        if not isinstance(resolved_model, str):
+            raise ValueError("model must be a string")
+        normalized_model = resolved_model.strip()
+        if not normalized_model:
+            raise ValueError("model must be a nonempty string")
+
+        if not isinstance(base_url, str):
+            raise ValueError("base_url must be a string")
+        normalized_base_url = base_url.strip().rstrip("/")
+        try:
+            parsed_base_url = urlsplit(normalized_base_url)
+        except ValueError as exc:
+            raise ValueError("base_url must be an absolute http/https URL") from exc
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("base_url must be an absolute http/https URL")
+
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("timeout must be a positive finite number")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries <= 0:
+            raise ValueError("max_retries must be a positive integer")
+
+        self.api_key = normalized_key
+        self.model = normalized_model
+        self.base_url = normalized_base_url
         self.timeout = timeout
         self.max_retries = max_retries
         self.strict = strict
         self.session = session
-
-        if not self.api_key:
-            raise RuntimeError("SILICONFLOW_API_KEY is required for SiliconFlow reranking")
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("timeout must be a positive finite number")
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries <= 0:
-            raise ValueError("max_retries must be a positive integer")
 
     def rerank(
         self,
@@ -157,6 +223,7 @@ class SiliconFlowReranker:
                 raise ValueError("rerank relevance_score must be finite")
             validated.append((index, score_value))
 
+        validated.sort(key=lambda pair: (-pair[1], original_indices[pair[0]]))
         ranked: list[dict[str, object]] = []
         for document_index, score in validated[:limit]:
             candidate = dict(candidates[original_indices[document_index]])
@@ -165,8 +232,4 @@ class SiliconFlowReranker:
         return ranked
 
     def _safe_error(self, error: Exception) -> str:
-        message = str(error)
-        message = re.sub(r"(?i)bearer\s+[^\s,}\]]+", "[REDACTED]", message)
-        if self.api_key:
-            message = message.replace(self.api_key, "[REDACTED]")
-        return message
+        return sanitize_rerank_error(error, api_key=self.api_key)

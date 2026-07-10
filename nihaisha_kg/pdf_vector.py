@@ -3858,11 +3858,14 @@ def answer_pdf_rag(
         intent_results = rerank_outcome.results
     results = select_diverse_results(intent_results, limit=limit, intent=intent)
     answer = synthesize_pdf_rag_answer(query, results)
+    if rerank_outcome is not None:
+        from .rerank import sanitize_rerank_error
+
     answer["rerank"] = (
         {
             "model": rerank_outcome.model,
             "degraded_feature": rerank_outcome.degraded_feature,
-            "error": rerank_outcome.error,
+            "error": sanitize_rerank_error(rerank_outcome.error),
         }
         if rerank_outcome is not None
         else {"model": "none", "degraded_feature": "", "error": ""}

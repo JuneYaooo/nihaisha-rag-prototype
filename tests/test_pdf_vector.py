@@ -1268,6 +1268,13 @@ class PdfVectorTests(unittest.TestCase):
 
     def test_answer_pdf_rag_synthesizes_after_rerank_degradation(self) -> None:
         candidates = [{"paragraph_id": "p1", "text": "甲"}, {"paragraph_id": "p2", "text": "乙"}]
+        configured_key = "configured-secret"
+        injected_secret = "supersecret"
+        sk_secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+        unsafe_error = (
+            f"Authorization: Bearer {injected_secret}\x00 api_key={configured_key} "
+            f"token={sk_secret} " + "details " * 200
+        )
 
         class FakeStore:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -1287,7 +1294,7 @@ class PdfVectorTests(unittest.TestCase):
                     results=[dict(row) for row in incoming[:limit]],
                     model="fake-reranker",
                     degraded_feature="siliconflow_rerank",
-                    error="offline",
+                    error=unsafe_error,
                 )
 
         def fake_synthesize(_query: str, results: list[dict[str, object]]) -> dict[str, object]:
@@ -1302,31 +1309,34 @@ class PdfVectorTests(unittest.TestCase):
                 "results": results,
             }
 
-        with (
-            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
-            patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
-            patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=candidates),
-            patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=candidates),
-            patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
-            patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", side_effect=fake_synthesize),
-        ):
-            answer = answer_pdf_rag(
-                "问题",
-                Path("/unused/rag.sqlite"),
-                mode="text",
-                limit=2,
-                reranker_backend=DegradedReranker(),
-            )
+        with patch.dict(os.environ, {"SILICONFLOW_API_KEY": configured_key}):
+            with (
+                patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+                patch("nihaisha_kg.pdf_vector.build_query_plan", return_value=["问题"]),
+                patch("nihaisha_kg.pdf_vector.run_query_plan_search", return_value=candidates),
+                patch("nihaisha_kg.pdf_vector.filter_results_for_intent", return_value=candidates),
+                patch("nihaisha_kg.pdf_vector.select_diverse_results", side_effect=lambda rows, **_: rows),
+                patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", side_effect=fake_synthesize),
+            ):
+                answer = answer_pdf_rag(
+                    "问题",
+                    Path("/unused/rag.sqlite"),
+                    mode="text",
+                    limit=2,
+                    reranker_backend=DegradedReranker(),
+                )
 
         self.assertEqual(answer["answer"], "fallback evidence synthesized")
-        self.assertEqual(
-            answer["rerank"],
-            {
-                "model": "fake-reranker",
-                "degraded_feature": "siliconflow_rerank",
-                "error": "offline",
-            },
-        )
+        metadata = answer["rerank"]
+        self.assertEqual(set(metadata), {"model", "degraded_feature", "error"})
+        self.assertEqual(metadata["model"], "fake-reranker")
+        self.assertEqual(metadata["degraded_feature"], "siliconflow_rerank")
+        self.assertLessEqual(len(metadata["error"]), 240)
+        self.assertNotIn(injected_secret, metadata["error"])
+        self.assertNotIn(configured_key, metadata["error"])
+        self.assertNotIn(sk_secret, metadata["error"])
+        self.assertNotIn("\x00", metadata["error"])
+        self.assertNotIn("Bearer supersecret", metadata["error"])
 
     def test_answer_pdf_rag_validates_reranker_before_opening_store(self) -> None:
         with patch("nihaisha_kg.pdf_vector.LocalVectorStore") as store:
