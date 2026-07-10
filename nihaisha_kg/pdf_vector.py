@@ -1267,7 +1267,10 @@ def read_faiss_unit_ids(ids_path: Path) -> list[str]:
         if not line.strip():
             continue
         payload = json.loads(line)
-        unit_ids.append(str(payload["unit_id"]))
+        unit_id = payload["unit_id"]
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            raise ValueError("FAISS unit IDs must be nonempty strings")
+        unit_ids.append(unit_id)
     return unit_ids
 
 
@@ -2247,6 +2250,21 @@ class LocalVectorStore:
         except Exception:  # malformed artifacts and third-party loader failures fall back safely
             return None
         if not unit_ids:
+            return None
+        if len(unit_ids) != len(set(unit_ids)):
+            return None
+        try:
+            ntotal = index.ntotal
+            if isinstance(ntotal, bool):
+                return None
+            if int(ntotal) < 0 or int(ntotal) != len(unit_ids):
+                return None
+            sqlite_unit_ids = [
+                str(row[0]) for row in conn.execute("SELECT unit_id FROM retrieval_units").fetchall()
+            ]
+        except Exception:
+            return None
+        if len(sqlite_unit_ids) != len(unit_ids) or set(sqlite_unit_ids) != set(unit_ids):
             return None
         top_k = min(len(unit_ids), max(unit_limit, limit * 20))
         try:

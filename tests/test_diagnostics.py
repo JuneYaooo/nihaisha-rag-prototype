@@ -48,6 +48,51 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("faiss_files_missing", codes)
         self.assertNotIn("faiss_module_missing", codes)
 
+    def test_doctor_rejects_missing_empty_and_unknown_vector_kind(self) -> None:
+        for vector_kind in (None, "", "bogus"):
+            with self.subTest(vector_kind=vector_kind), tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "rag.sqlite"
+                store = LocalVectorStore(db_path)
+                store.recreate()
+                store.rebuild_text_index()
+                store.rebuild_knowledge_units()
+                with closing(sqlite3.connect(db_path)) as conn:
+                    if vector_kind is None:
+                        conn.execute("DELETE FROM meta WHERE key = 'vector_kind'")
+                    else:
+                        conn.execute(
+                            "UPDATE meta SET value = ? WHERE key = 'vector_kind'",
+                            (vector_kind,),
+                        )
+                    conn.commit()
+
+                report = doctor(db_path, faiss_loader=lambda: None)
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertNotEqual(report["status"], "ok")
+            self.assertIn("vector_metadata_invalid", codes)
+
+    def test_doctor_rejects_missing_embedding_and_nonpositive_vector_dimension(self) -> None:
+        for sql in (
+            "DELETE FROM meta WHERE key = 'embedding'",
+            "UPDATE meta SET value = '0' WHERE key = 'vector_dim'",
+        ):
+            with self.subTest(sql=sql), tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "rag.sqlite"
+                store = LocalVectorStore(db_path)
+                store.recreate()
+                store.rebuild_text_index()
+                store.rebuild_knowledge_units()
+                with closing(sqlite3.connect(db_path)) as conn:
+                    conn.execute(sql)
+                    conn.commit()
+
+                report = doctor(db_path, faiss_loader=lambda: None)
+
+            codes = {item["code"] for item in report["diagnoses"]}
+            self.assertNotEqual(report["status"], "ok")
+            self.assertIn("vector_metadata_invalid", codes)
+
     def test_doctor_handles_missing_invalid_and_incomplete_databases(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

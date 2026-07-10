@@ -61,6 +61,10 @@ class FakeFaissIndex:
             rows = vectors
         self.vectors.extend([[float(value) for value in row] for row in rows])
 
+    @property
+    def ntotal(self) -> int:
+        return len(self.vectors)
+
     def search(self, queries: object, top_k: int) -> tuple[list[list[float]], list[list[int]]]:
         if hasattr(queries, "tolist"):
             query = queries.tolist()[0]
@@ -93,6 +97,59 @@ class FakeFaiss:
 
 
 class PdfVectorTests(unittest.TestCase):
+    def _assert_unhealthy_faiss_mapping_reaches_dense_guard(
+        self,
+        mapped_unit_ids: list[str],
+    ) -> None:
+        paragraph = ParsedParagraph(
+            paragraph_id="p-a", doc_id="doc", source_path="/tmp/doc.pdf", title="test",
+            page_start=1, page_end=1, text="桂枝汤主之。",
+        )
+
+        class ToyDenseBackend(DenseEmbeddingBackend):
+            name = "toy_dense"
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                return [[1.0, 0.0] for _ in texts]
+
+        units = [
+            RetrievalUnit(
+                unit_id=f"u-{index}", paragraph_id="p-a", doc_id="doc",
+                unit_type="sentence", text=f"unit {index}", text_for_embedding=f"unit {index}",
+                sentence_start=index, sentence_end=index, weight=1.0,
+            )
+            for index in range(3)
+        ]
+        fake_faiss = FakeFaiss()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db_path = base / "rag.sqlite"
+            index_path = base / "vectors.faiss"
+            ids_path = base / "vector_ids.jsonl"
+            store = LocalVectorStore(
+                db_path, embedding_backend=ToyDenseBackend(), brute_force_limit=2,
+            )
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(units)
+            index_path.write_text("index", encoding="utf-8")
+            ids_path.write_text(
+                "\n".join(json.dumps({"unit_id": unit_id}) for unit_id in mapped_unit_ids) + "\n",
+                encoding="utf-8",
+            )
+            index = FakeFaissIndex(2)
+            index.add([[1.0, 0.0] for _ in mapped_unit_ids])
+            fake_faiss.indexes[str(index_path)] = index
+
+            with self.assertRaisesRegex(RuntimeError, "FAISS.*nihaisha-rag doctor"):
+                store.search_vector("桂枝汤", faiss_module=fake_faiss)
+
+    def test_dense_search_rejects_faiss_mapping_count_mismatch(self) -> None:
+        self._assert_unhealthy_faiss_mapping_reaches_dense_guard(["u-0"])
+
+    def test_dense_search_rejects_duplicate_faiss_mapping_ids(self) -> None:
+        self._assert_unhealthy_faiss_mapping_reaches_dense_guard(["u-0", "u-0", "u-2"])
+
     def test_vector_store_rebuilds_guide_nodes_from_original_evidence(self) -> None:
         paragraph = ParsedParagraph(
             paragraph_id="p-guide",

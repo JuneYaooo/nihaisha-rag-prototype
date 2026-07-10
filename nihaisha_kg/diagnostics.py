@@ -113,32 +113,42 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
         add("db_invalid_sqlite", "error", "database is not valid readable SQLite", error=type(exc).__name__)
         return report()
 
-    dense = meta.get("vector_kind") == "dense"
-    if dense:
-        missing_dense_meta = [key for key in ("embedding", "vector_dim") if not meta.get(key)]
-        if missing_dense_meta:
-            add(
-                "dense_metadata_missing",
-                "error",
-                "dense-vector metadata is incomplete",
-                keys=missing_dense_meta,
-            )
+    invalid_metadata: list[str] = []
+    vector_kind = meta.get("vector_kind", "").strip()
+    if vector_kind not in {"sparse", "dense"}:
+        invalid_metadata.append("vector_kind")
+    if not meta.get("embedding", "").strip():
+        invalid_metadata.append("embedding")
+    try:
+        vector_dim = int(meta.get("vector_dim", ""))
+        if vector_dim <= 0:
+            raise ValueError("vector dimension must be positive")
+    except (TypeError, ValueError):
+        vector_dim = 0
+        invalid_metadata.append("vector_dim")
+    if invalid_metadata:
+        add(
+            "vector_metadata_invalid",
+            "error",
+            "vector metadata is missing or invalid",
+            fields=invalid_metadata,
+        )
+    metadata_valid = not invalid_metadata
+    dense = metadata_valid and vector_kind == "dense"
+    if metadata_valid:
+        add("vector_metadata", "ok", "vector metadata is valid", vector_kind=vector_kind)
+        if dense:
+            add("dense_metadata", "ok", "dense-vector metadata is present", dimensions=vector_dim)
         else:
-            try:
-                vector_dim = int(meta["vector_dim"])
-                if vector_dim <= 0:
-                    raise ValueError("vector dimension must be positive")
-                add("dense_metadata", "ok", "dense-vector metadata is present", dimensions=vector_dim)
-            except (TypeError, ValueError):
-                add("dense_metadata_invalid", "error", "dense-vector metadata is invalid")
-
-    if meta.get("vector_kind") and not dense:
-        return report()
+            return report()
 
     index_path = db_path.with_name("vectors.faiss")
     ids_path = db_path.with_name("vector_ids.jsonl")
     artifacts_present = index_path.is_file() and ids_path.is_file()
-    if dense and not artifacts_present:
+    if not metadata_valid:
+        if not ids_path.is_file():
+            return report()
+    elif dense and not artifacts_present:
         add("faiss_files_missing", "error", "vectors.faiss or vector_ids.jsonl is missing")
     elif artifacts_present:
         add("faiss_files", "ok", "FAISS index and ID mapping are present")
@@ -179,6 +189,9 @@ def doctor(db_path: Path, faiss_loader: Callable[[], object | None]) -> dict[str
                 "FAISS ID mapping could not be parsed",
                 error=type(exc).__name__,
             )
+
+    if not metadata_valid:
+        return report()
 
     faiss: object | None = None
     if dense or artifacts_present:
