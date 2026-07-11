@@ -1,71 +1,92 @@
-# nihaisha-rag-prototype
+# 倪海厦课程资料本地 RAG
 
-这是一个面向倪海厦 PDF 课程资料的本地 RAG Skill。它的目标不是做聊天机器人外壳，而是把已经整理好的原文段落、知识图谱、全文索引、BAAI/bge-m3 向量库和 FAISS 加速索引一起打包，让 Agent 能够围绕资料做可追溯的检索、引用和答案整理。
+本仓库把 11 份课程 PDF 的原文段落、全文索引、知识图谱、BAAI/bge-m3 dense 向量和 FAISS 索引打包成一个可追溯的本地检索工具。它适合课程学习、原文与页码查找、方证比较和证据整理；不是医疗诊断或处方系统。
 
-本仓库是初版，只保留当前可用的 Skill、数据库、知识图谱和搜索逻辑，不保留旧 UI、旧截图资产、旧 references、旧实验文档或部署文件。
+## 五分钟开始
 
-## 适合做什么
+需要 Python 3.11+ 和 Git LFS。在仓库根目录执行：
 
-它适合用于倪海厦课程资料学习、原文查找、出处定位、章节段落回溯、术语检索、方证线索对比、剂量单位资料查证，以及把多个检索结果整理成带引用的学习型答案。
+```bash
+git lfs pull
+python3 -m pip install -e ".[runtime]"
+cp .env.example .env
+```
 
-它不适合用于个人诊断、开方、剂量决策、自行购药、针灸或外治操作指导。涉及剂量、方药、处方线索或真实病情时，Skill 会保留安全边界：不同人的体质、病情阶段、兼证、年龄、基础病和用药史都不同；现代药材来源、炮制、浓度和药效也和以前差很多，建议去线下正规中医渠道面诊辨证，不要私自购药。
+编辑 `.env`，只在本机填写 `SILICONFLOW_API_KEY`，不要提交它。运行需要 SiliconFlow 的命令时，程序会查找当前目录、父目录和模块根目录中最近的 `.env`，按 `KEY=VALUE` 解析（不会作为 shell 脚本执行）；已经导出的同名环境变量优先。也可不把 key 写入文件，改由密码管理器/环境管理工具注入；在 zsh 中可用下面的无回显方式，仅导出到当前 shell，避免写进命令历史：
 
-## 里面有什么
+```zsh
+read -r -s "SILICONFLOW_API_KEY?SiliconFlow API Key: "
+echo
+export SILICONFLOW_API_KEY
+```
 
-仓库中包含一个面向日常检索、引用和回答的 Skill 入口，一个精简的 Python 模块，以及一份已经构建好的本地数据库。构建、增量更新、FAISS 重建和发布校验逻辑会沉淀到独立的 builder Skill 仓库中，不放在这个使用仓库里。
+然后依次运行：
 
-本地数据库保存了 PDF 原文段落、段落来源、页码、全文索引、知识图谱单元和向量召回单元。知识图谱覆盖症状、方证、剂量、方法、比较和注意事项等结构化线索。向量召回单元覆盖单句、拼句窗口、整段和段落问题化表达，最终返回时会映射回原始段落，方便核对出处。
+```bash
+python3 -m nihaisha_kg doctor
+python3 -m nihaisha_kg search "桂枝汤和麻黄汤的方证如何鉴别？" --mode hybrid --limit 8
+python3 -m nihaisha_kg answer "木香饼热熨法来自哪一本书哪一段？" --trace
+python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid
+```
 
-向量模型使用的是 SiliconFlow 的 BAAI/bge-m3 dense embedding，向量维度为 1024。SQLite 是主库，保存原文、知识图谱、全文索引、向量和元数据；FAISS 文件是加速索引，用来让语义召回更快。即使没有 FAISS，系统仍可以回退到 SQLite 中的向量数据，只是速度会慢很多。
+`doctor` 应返回顶层 `"status": "ok"`。如果系统 Python 因 PEP 668 拒绝安装，请先进入虚拟环境，再原样运行安装命令。若只需精确词句或知识图谱，可不配置 key，改用 `--mode text` 或 `--mode knowledge`。
 
-当前数据库包含 11 份文档、5,375 个原文段落、159,286 个检索单元和 10,436 个知识图谱单元。仓库中的大文件通过 Git LFS 保存，包括 SQLite 主库和 FAISS 索引。
+## 运行规则
 
-## 如何配置
+- 当前生产库包含 159,286 个 dense 检索单元。`vector` 和 `hybrid` 必须有 FAISS；不会静默退化成 SQLite 全量向量扫描。缺少模块或索引时先按 `doctor` 的诊断修复。
+- `text` 和 `knowledge` 不调用 embedding API，不需要 key。
+- `vector` 和 `hybrid` 同时需要查询 embedding 后端与 FAISS。推荐 SiliconFlow `BAAI/bge-m3`；离线可选本地后端：`python3 -m pip install -e ".[local]"`，并传 `--embedding local-bge-m3`。
+- CLI 的 `--reranker auto` 仅在存在 `SILICONFLOW_API_KEY` 时调用 SiliconFlow reranker；`--reranker none` 明确关闭。服务失败时会保留召回结果，并在 trace 中给出已脱敏的降级状态。
+- 普通文本输出保持兼容。程序化检查使用 JSON：`search ... --json --trace` 给出召回渠道/各渠道排名、最终选中段落 ID、reranker 模型/降级状态和搜索延迟；`answer ... --json --trace` 的回答 JSON 还给出分组的初始/追问计划、各计划观察结果的排名与渠道，以及各阶段延迟。两类 trace 都绝不包含 key、请求头、向量或完整证据正文。
 
-推荐把整个仓库作为 Skill 安装，因为数据库和 Skill 在同一个目录内。安装后重启 Codex 或你的 Agent，让 Skill 元数据重新加载。
+当引用可疑、结果串题或需要复核排序时：
 
-首次获取仓库后，需要确认 Git LFS 已经把大文件拉取完整。完整数据库应该包含 SQLite 主库、FAISS 索引、FAISS 到检索单元的映射文件，以及构建摘要文件。如果只看到很小的指针文件，说明 Git LFS 还没有拉取真实数据。
+```bash
+python3 -m nihaisha_kg search "问题" --mode hybrid --limit 8 --json --trace
+python3 -m nihaisha_kg answer "问题" --mode hybrid --limit 8 --json --trace
+```
 
-语义召回默认建议使用 SiliconFlow API，因为这样不需要在本机安装较大的 embedding 模型。配置时在本地环境文件中填写 SiliconFlow API Key 即可，不要提交真实 key。SiliconFlow 的 embedding 接口文档是 https://api-docs.siliconflow.cn/docs/api/embeddings-post。
+先核对 `selected_paragraph_ids`、渠道/排名和降级状态，再回到 citation 中的 PDF 名称、页码与原文摘录。trace 是诊断信息，不是证据。
 
-如果不想依赖 API，也可以改用本地 BAAI/bge-m3。这个模式默认不安装，因为模型和依赖会更大；需要离线或无 API 完整向量召回时，再安装本地 embedding 可选依赖。第一次使用本地模型时，模型会下载到 HuggingFace 缓存。
+## 当前数据与质量基线
 
-FAISS 是可选加速能力。项目已经带了构建好的 FAISS 索引；如果你以后重建数据库或更新向量，再安装 FAISS 可选依赖并重建索引即可。
+`python3 -m nihaisha_kg stats` 当前实测为：11 份文档、5,375 个原文段落、159,286 个检索单元、10,436 个知识图谱单元、19,072 个 guide nodes；dense 向量为 1024 维，FAISS 映射同为 159,286 条。
 
-## 如何使用
+仓库提交了 7 条回归种子用例 `evals/golden_v1.jsonl` 和一次实测结果 `evals/baseline_v1.json`。复现命令：
 
-在 Agent 中可以直接说明要使用这个 Skill 查询倪海厦资料。例如，可以让它查“一钱是多少克”、查“木香饼热熨法来自哪本书哪一段”、查某个方证的原文依据，或要求它把检索到的证据按出处整理成答案。
+```bash
+python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10
+```
 
-回答组织由 Agent 自身完成：工具负责检索原文、给出引用和保守初稿，Agent 再基于这些证据重整为更流畅的答案。仓库不再内置额外的大模型二次整理器，也不单独配置聊天模型；最终答案仍必须严格限制在检索返回的证据和引用范围内。
+本次基线聚合值：Recall@5 = **0.4761904762**，Recall@10 = **0.5238095238**，MRR（`reciprocal_rank`）= **0.4047619048**，nDCG@10 = **0.3908372076**，context precision@10 = **0.3190476190**，forbidden hits@10 = **0.0**。
 
-最终输出应先给总结，且总结中的事实点要带引用编号；随后列出“原文依据”，把每个编号关联到 PDF 名称、页码和原文摘录，方便从答案直接回溯到资料原文。
+- Recall@k：前 k 条覆盖了多少标注相关段落。
+- MRR：第一个相关段落排名倒数的平均值，越高表示首次命中越靠前。
+- nDCG@10：考虑相关结果排序位置的折损收益。
+- context precision@10：相关段落在前 10 条中的排序精度。
+- forbidden hits@10：前 10 条命中明确禁止段落的平均次数，越低越好。
 
-当检索结果包含知识图谱线索时，答案还可以列出“关联知识点与辨证线索”，例如方证、症状、剂量、方法、比较和注意事项等。它们用于帮助用户理解资料中的辨证关系，但仍必须绑定到检索到的原文证据，不能扩展成个人诊断、处方或用药建议。
+这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。现阶段限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及权威古籍原文和外部学术来源尚未入库。
 
-可以参考临床医生导图的组织模式，但数据来源仍然是本仓库的原文段落和知识图谱。先运行 `python3 -m nihaisha_kg rebuild-knowledge-units`，再运行 `python3 -m nihaisha_kg rebuild-guide-nodes`，即可从原文证据抽取 `guide_nodes`。之后答案会额外返回 `related_guide_nodes`、`differentiation_flow` 和 `followup_questions`，用于把“方证、病理链条、鉴别点、关键追问”组织成更友好的辨证流程图。导图节点只做导航，最终依据仍以 PDF 原文引用为准。
+## 证据分层
 
-如果只是查术语、书名、页码、原文句子或非常明确的关键词，全文搜索和知识图谱检索通常更快，也不需要 embedding API。
+回答时必须区分以下层级，不能把不同来源悄悄合并：
 
-如果问题是自然语言表达，或者用户说法和原文不完全一致，应该使用 hybrid 检索。hybrid 会合并向量语义召回、全文搜索和知识图谱线索，再按原文段落去重返回。
+| 层级 | 当前状态 | 用法 |
+| --- | --- | --- |
+| `course_primary` | 已入库 | 当前运行时答案的主证据：课程 PDF 原文、书名/文件名、页码和摘录 |
+| `classic_primary` | 未来单独版本化入库 | 讲课中引用或提及的权威古籍原文；与课程转述分别引用 |
+| `reference_secondary` | 未来入库，权威级别较低 | 学术研究、参考书和网页材料，只作补充 |
+| `derived` | 部分已入库 | 图谱三元组、guide nodes、查询扩展，仅用于导航，不可独立作为事实依据 |
 
-如果问题涉及“这个说法来自哪里”“哪本书哪一页”“原文怎么说”，答案必须优先展示来源、页码、原文段落和 evidence quote，而不是直接泛泛总结。
+未来古籍或网页证据记录至少要保存：题名与版本/网站、卷/章/行或稳定定位、稳定 URL/来源、访问日期、许可与版本、逐字引文、对应课程提及的链接、置信度和审核状态。课程主张与古籍原文必须分别引用；不得把倪海厦的转述无标记地写成古籍原句。尚未进入本库的外部/古籍材料必须标为“外部材料（本库未检索）”，不能冒充 bundled evidence。
 
-如果问题涉及真实病人、剂量或方药建议，答案必须转成资料学习和辨证思路整理，不能给出个人处方结论，并且必须提醒线下正规中医面诊。
+## 新增资料与发布
 
-## 数据库组织
+以后可通过 `/Users/june/code/github/nihaisha-rag-builder` 增量加入 PDF，用户不必一次提供全部资料。构建端负责抽取、规范化、生成向量与索引、验证，并以 staging → 校验 → 原子发布的方式替换成套产物；本运行时仓库不直接修改生产数据库。新增资料仍受 OCR、版权/许可和人工复核质量约束。
 
-SQLite 主库是最终可信来源。它保存原始段落、来源路径、页码、全文索引、知识图谱单元、检索单元和向量元数据。
+## 安全边界
 
-知识图谱单元会记录 subject、predicate、object、类型、证据原文和所在段落。它适合回答“是什么”“来自哪里”“和什么比较”“有哪些注意事项”这类结构化问题。
+本项目只用于课程资料学习和来源核对。不要据此进行个人诊断、开方、剂量决策、自行购药、针灸或外治操作。
 
-检索单元用于召回，不直接作为最终答案单位。单句适合精确命中，拼句窗口适合保留上下文，整段适合语义完整性，问题化表达适合匹配用户提问方式。最终结果会统一映射回段落，避免答案碎片化。
-
-FAISS 索引用于近邻搜索加速，映射文件用于把 FAISS 行号还原到检索单元，再通过 SQLite 找回原文段落。SQLite 仍然是主库，FAISS 只是加速层。
-
-## 维护原则
-
-这个仓库只维护当前最有用的一套 Skill 和数据库。旧实验文档、临时构建产物、未使用的 demo、旧版命名和无关资产都不放进来。
-
-真实 API Key 不进入仓库。数据库和向量索引可以进入仓库，但需要通过 Git LFS 管理。以后新增资料时，应重新抽取段落、生成多层检索单元、更新知识图谱、写入向量、重建全文索引和 FAISS 索引，并保留必要的构建摘要，方便追溯数据来源与构建方式。
-
-维护者需要重建数据库或增量更新资料时，应使用独立的 `nihaisha-rag-builder` Skill 仓库，并参考 `docs/BUILD_AND_UPDATE.md`；README 只保留用户视角说明，不承载具体构建步骤。
+涉及剂量、方药或处方线索时必须谨慎：不同人的体质不同，病情阶段、兼证、年龄、基础病和用药史都不同；现代药材来源、炮制、浓度和药效也和以前差很多。建议去线下正规中医渠道面诊辨证，不要私自购药有风险。
