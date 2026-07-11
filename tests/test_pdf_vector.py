@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, redirect_stdout
 from pathlib import Path
@@ -56,6 +57,23 @@ from nihaisha_kg.pdf_vector import (
     load_faiss_bundle,
     read_faiss_unit_ids,
 )
+
+
+def synthetic_private_values() -> dict[str, str]:
+    marker = uuid.uuid4().hex
+    account = f"account-{marker}"
+    directory = f"segment-{marker}"
+    credential = f"value-{marker}"
+    return {
+        "marker": marker,
+        "account": account,
+        "directory": directory,
+        "credential": credential,
+        "posix_root": f"/mnt/{account}/{directory}",
+        "windows_root": rf"Z:\{account}\{directory}",
+        "drive_relative_root": rf"Z:{account}\{directory}",
+        "uri_authority": f"{account}:{credential}@example.test:8443",
+    }
 
 
 class FakeFaissIndex:
@@ -114,20 +132,23 @@ class PdfVectorTests(unittest.TestCase):
         pdf_vector.clear_faiss_caches()
 
     def test_public_source_path_removes_absolute_posix_and_windows_roots(self) -> None:
+        private = synthetic_private_values()
         self.assertEqual(
-            pdf_vector.public_source_path("/Users/alice/private/伤寒论.pdf"),
+            pdf_vector.public_source_path(f"{private['posix_root']}/伤寒论.pdf"),
             "pdfs/伤寒论.pdf",
         )
         self.assertEqual(
-            pdf_vector.public_source_path(r"C:\Users\alice\private\金匮.pdf"),
+            pdf_vector.public_source_path(rf"{private['windows_root']}\金匮.pdf"),
             "pdfs/金匮.pdf",
         )
         self.assertEqual(
-            pdf_vector.public_source_path(r"C:Users\alice\private\温病.pdf"),
+            pdf_vector.public_source_path(rf"{private['drive_relative_root']}\温病.pdf"),
             "pdfs/温病.pdf",
         )
         self.assertEqual(
-            pdf_vector.public_source_path("file:C:/Users/alice/private/本草.pdf"),
+            pdf_vector.public_source_path(
+                f"file:Z:/{private['account']}/{private['directory']}/本草.pdf"
+            ),
             "pdfs/本草.pdf",
         )
         self.assertEqual(
@@ -140,14 +161,17 @@ class PdfVectorTests(unittest.TestCase):
         )
 
     def test_public_source_path_discards_uri_secrets_and_sanitizes_basename(self) -> None:
-        sentinel = "URI_SECRET_SENTINEL"
+        private = synthetic_private_values()
+        sentinel = private["credential"]
+        authority = private["uri_authority"]
+        directory = private["directory"]
         cases = {
-            f"https://alice:{sentinel}@private.example:8443": "pdfs/source.pdf",
-            f"https://alice:{sentinel}@private.example/course/伤寒论.pdf?sig={sentinel}#{sentinel}":
+            f"https://{authority}": "pdfs/source.pdf",
+            f"https://{authority}/{directory}/伤寒论.pdf?sig={sentinel}#{sentinel}":
                 "pdfs/伤寒论.pdf",
-            f"s3://{sentinel}-bucket/private/金匮.pdf?token={sentinel}": "pdfs/金匮.pdf",
-            "file:///Users/alice/private/针灸.pdf": "pdfs/针灸.pdf",
-            "file:C:/Users/alice/private/本草.pdf": "pdfs/本草.pdf",
+            f"s3://bucket-{private['marker']}/{directory}/金匮.pdf?token={sentinel}": "pdfs/金匮.pdf",
+            f"file://{private['posix_root']}/针灸.pdf": "pdfs/针灸.pdf",
+            f"file:Z:/{private['account']}/{directory}/本草.pdf": "pdfs/本草.pdf",
             "https://example.test/course/%E9%BB%84%E5%B8%9D%E5%86%85%E7%BB%8F.pdf":
                 "pdfs/黄帝内经.pdf",
             "https://example.test/course/%2E%2E%2Fodd%5Cname.pdf": "pdfs/name.pdf",
@@ -164,22 +188,24 @@ class PdfVectorTests(unittest.TestCase):
                 self.assertNotRegex(public, r"[?#\x00-\x1f\x7f]")
 
     def test_public_source_path_rejects_encoded_unsafe_relative_components(self) -> None:
+        private = synthetic_private_values()
+        filename = f"source-{private['marker']}.pdf"
         unsafe = (
-            "safe/%2e%2e/private.pdf",
-            "safe/%2Fetc/private.pdf",
-            "safe/%5Cserver/private.pdf",
-            "safe/%00hidden/private.pdf",
-            "safe/%3Ftoken/private.pdf",
-            "safe/%252e%252e/private.pdf",
-            "safe/%252Fetc/private.pdf",
-            "safe/%2500hidden/private.pdf",
-            "%43%3A/Users/alice/private.pdf",
-            "%66%69%6c%65%3A/Users/alice/private.pdf",
-            "%2543%253A/Users/alice/private.pdf",
+            f"safe/%2e%2e/{filename}",
+            f"safe/%2Fetc/{filename}",
+            f"safe/%5Cserver/{filename}",
+            f"safe/%00hidden/{filename}",
+            f"safe/%3Ftoken/{filename}",
+            f"safe/%252e%252e/{filename}",
+            f"safe/%252Fetc/{filename}",
+            f"safe/%2500hidden/{filename}",
+            f"%5A%3A/{private['account']}/{filename}",
+            f"%66%69%6c%65%3A/{private['account']}/{filename}",
+            f"%255A%253A/{private['account']}/{filename}",
         )
         for source in unsafe:
             with self.subTest(source=source):
-                self.assertEqual(pdf_vector.public_source_path(source), "pdfs/private.pdf")
+                self.assertEqual(pdf_vector.public_source_path(source), f"pdfs/{filename}")
 
         self.assertEqual(
             pdf_vector.public_source_path(
@@ -189,11 +215,13 @@ class PdfVectorTests(unittest.TestCase):
         )
 
     def test_public_source_path_decodes_whole_path_before_selecting_basename(self) -> None:
-        sentinel = "ENCODED_PRIVATE_SENTINEL"
-        posix = "/Users/alice/private/secret.pdf"
-        windows = r"C:\Users\alice\private\secret.pdf"
+        private = synthetic_private_values()
+        sentinel = private["credential"]
+        filename = f"source-{private['marker']}.pdf"
+        posix = f"{private['posix_root']}/{filename}"
+        windows = rf"{private['windows_root']}\{filename}"
         encoded_uri = quote(
-            f"https://alice:{sentinel}@private.example/{posix.lstrip('/')}"
+            f"https://{private['uri_authority']}/{posix.lstrip('/')}"
             f"?signature={sentinel}#{sentinel}",
             safe="",
         )
@@ -204,32 +232,37 @@ class PdfVectorTests(unittest.TestCase):
             quote(windows, safe=""),
             quote(quote(windows, safe=""), safe=""),
             encoded_uri,
-            f"https://public.example/{encoded_uri_path}?signature={sentinel}#{sentinel}",
+            f"https://example.test/{encoded_uri_path}?signature={sentinel}#{sentinel}",
         )
         for source in cases:
             with self.subTest(source=source):
                 public = pdf_vector.public_source_path(source)
-                self.assertEqual(public, "pdfs/secret.pdf")
-                for private in ("Users", "alice", "private", sentinel):
-                    self.assertNotIn(private, public)
+                self.assertEqual(public, f"pdfs/{filename}")
+                for private_fragment in (
+                    private["account"], private["directory"], sentinel
+                ):
+                    self.assertNotIn(private_fragment, public)
 
         excessive = posix
         for _ in range(10):
             excessive = quote(excessive, safe="")
         self.assertEqual(pdf_vector.public_source_path(excessive), "pdfs/source.pdf")
         self.assertEqual(
-            pdf_vector.public_source_path("/Users/alice/" + "x" * 9000 + "/secret.pdf"),
+            pdf_vector.public_source_path(
+                f"/mnt/{private['account']}/" + "x" * 9000 + f"/{filename}"
+            ),
             "pdfs/source.pdf",
         )
 
     def test_public_search_modes_and_answer_hide_absolute_source_roots(self) -> None:
-        sentinel = "URI_SECRET_SENTINEL"
+        private = synthetic_private_values()
+        sentinel = private["credential"]
         encoded_private_path = quote(
-            quote("/Users/alice/private/伤寒论.pdf", safe=""),
+            quote(f"{private['posix_root']}/伤寒论.pdf", safe=""),
             safe="",
         )
         private_source = (
-            f"https://alice:{sentinel}@private.example:8443/{encoded_private_path}"
+            f"https://{private['uri_authority']}/{encoded_private_path}"
             f"?signature={sentinel}#{sentinel}"
         )
         paragraph = ParsedParagraph(
@@ -267,8 +300,8 @@ class PdfVectorTests(unittest.TestCase):
             self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in results))
         serialized = json.dumps(answer, ensure_ascii=False)
         self.assertNotIn(sentinel, serialized)
-        self.assertNotIn("private.example", serialized)
-        self.assertNotIn("alice", serialized)
+        self.assertNotIn(private["account"], serialized)
+        self.assertNotIn(private["directory"], serialized)
         self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in answer["results"]))
         self.assertTrue(
             all(citation["source_path"] == "pdfs/伤寒论.pdf" for citation in answer["citations"])
