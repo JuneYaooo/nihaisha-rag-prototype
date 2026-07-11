@@ -282,10 +282,38 @@ class RerankTests(unittest.TestCase):
                 raise AssertionError("full conversion must not run")
 
         message = HostileString("safe-prefix " + "x" * 5_000_000)
-        sanitized = sanitize_rerank_error(message, max_chars=80)
+        with patch.dict(os.environ, {}, clear=True):
+            sanitized = sanitize_rerank_error(message, max_chars=80)
 
         self.assertLessEqual(len(sanitized), 80)
         self.assertTrue(sanitized.startswith("safe-prefix"))
+
+    def test_oversized_input_with_known_keys_fails_closed_before_replacement(self) -> None:
+        configured_key = "configured-key-sentinel"
+        environment_key = "environment-key-sentinel"
+        message = (
+            configured_key
+            + "x" * MAX_SANITIZER_INPUT_CHARS
+            + configured_key
+            + environment_key
+        )
+
+        with patch.dict(os.environ, {"SILICONFLOW_API_KEY": environment_key}):
+            sanitized = sanitize_rerank_error(message, api_key=configured_key)
+            short = sanitize_rerank_error(message, api_key=configured_key, max_chars=4)
+
+        self.assertEqual(sanitized, "[REDACTED]")
+        self.assertEqual(short, "[RED")
+        self.assertFalse(configured_key in sanitized)
+        self.assertFalse(environment_key in sanitized)
+
+        with patch.dict(os.environ, {}, clear=True):
+            without_key = sanitize_rerank_error(
+                "useful-prefix " + "x" * (MAX_SANITIZER_INPUT_CHARS * 2),
+                max_chars=80,
+            )
+        self.assertTrue(without_key.startswith("useful-prefix"))
+        self.assertLessEqual(len(without_key), 80)
 
     def test_sanitizer_is_idempotent_for_generic_secret_fields(self) -> None:
         credential = "credential-sentinel"

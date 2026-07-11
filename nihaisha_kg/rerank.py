@@ -30,6 +30,8 @@ def sanitize_rerank_error(
     api_key: str | None = None,
     max_chars: int = PUBLIC_RERANK_ERROR_MAX_CHARS,
 ) -> str:
+    if max_chars <= 0:
+        return ""
     known_secrets = sorted(
         (
             secret
@@ -40,14 +42,16 @@ def sanitize_rerank_error(
         reverse=True,
     )
     if any(str.__len__(secret) > MAX_SANITIZER_SECRET_GUARD_CHARS for secret in known_secrets):
-        return "[REDACTED]"[:max_chars] if max_chars > 0 else ""
-    raw_window_chars = MAX_SANITIZER_INPUT_CHARS + max(
-        (str.__len__(secret) for secret in known_secrets),
-        default=0,
-    )
+        return "[REDACTED]"[:max_chars]
     if isinstance(error, str):
         try:
-            raw_message = str.__getitem__(error, slice(0, raw_window_chars))
+            raw_length = str.__len__(error)
+            if known_secrets and raw_length > MAX_SANITIZER_INPUT_CHARS:
+                return "[REDACTED]"[:max_chars]
+            raw_message = str.__getitem__(
+                error,
+                slice(0, MAX_SANITIZER_INPUT_CHARS),
+            )
         except Exception:
             raw_message = f"<{type(error).__name__}>"
     else:
@@ -55,7 +59,9 @@ def sanitize_rerank_error(
             rendered = str(error)
         except Exception:
             rendered = f"<{type(error).__name__}>"
-        raw_message = rendered[:raw_window_chars]
+        if known_secrets and len(rendered) > MAX_SANITIZER_INPUT_CHARS:
+            return "[REDACTED]"[:max_chars]
+        raw_message = rendered[:MAX_SANITIZER_INPUT_CHARS]
     for secret in known_secrets:
         raw_message = raw_message.replace(secret, "[REDACTED]")
     if len(raw_message) > MAX_SANITIZER_INPUT_CHARS:

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from nihaisha_kg import pdf_vector
 from nihaisha_kg import cli as rag_cli
-from nihaisha_kg.rerank import RerankOutcome
+from nihaisha_kg.rerank import MAX_SANITIZER_INPUT_CHARS, RerankOutcome
 from nihaisha_kg.pdf_vector import (
     DenseEmbeddingBackend,
     LocalBgeM3EmbeddingBackend,
@@ -1146,6 +1146,46 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("answer failed", stderr.getvalue())
         self.assertNotIn(secret, stderr.getvalue())
+
+    def test_cli_error_and_trace_fail_closed_for_oversized_known_key_input(self) -> None:
+        known_key = "configured-key-sentinel"
+        oversized = known_key + "x" * MAX_SANITIZER_INPUT_CHARS + known_key
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {"SILICONFLOW_API_KEY": known_key}),
+            patch("nihaisha_kg.cli.answer_pdf_rag", side_effect=RuntimeError(oversized)),
+            patch("sys.stderr", stderr),
+        ):
+            status = rag_cli.main(["answer", "question", "--mode", "text", "--json"])
+
+        self.assertEqual(status, 1)
+        self.assertIn("[REDACTED]", stderr.getvalue())
+        self.assertFalse(known_key in stderr.getvalue())
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def search(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return [{"paragraph_id": "p1", "text": "evidence", "score": 1.0}]
+
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {"SILICONFLOW_API_KEY": known_key}),
+            patch("nihaisha_kg.cli.LocalVectorStore", FakeStore),
+            redirect_stdout(stdout),
+        ):
+            status = rag_cli.main(
+                [
+                    "search", oversized, "--mode", "text", "--reranker", "none",
+                    "--json", "--trace",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["trace"]["normalized_query"], "[REDACTED]")
+        self.assertFalse(known_key in json.dumps(payload["trace"], ensure_ascii=False))
 
     def test_split_sentences_keeps_chinese_clause_punctuation(self) -> None:
         text = "太阳中风，阳浮而阴弱。桂枝汤主之！若无汗，不可误作同证？"
