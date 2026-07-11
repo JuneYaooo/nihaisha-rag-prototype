@@ -1013,7 +1013,7 @@ class PdfVectorTests(unittest.TestCase):
             status = rag_cli.main(
                 [
                     "search",
-                    f"query Auth\x9b31morization: Basic {secret}",
+                    f"query Auth\x1b[31orization: Digest username={secret}",
                     "--mode",
                     "text",
                     "--reranker",
@@ -1137,7 +1137,7 @@ class PdfVectorTests(unittest.TestCase):
         with (
             patch(
                 "nihaisha_kg.cli.answer_pdf_rag",
-                side_effect=RuntimeError(f"Authorization\x9b2K=Basic {secret}"),
+                side_effect=RuntimeError(f"Auth\x9b31orization=Basic {secret}"),
             ),
             patch("sys.stderr", stderr),
         ):
@@ -2211,7 +2211,7 @@ class PdfVectorTests(unittest.TestCase):
             patch("nihaisha_kg.pdf_vector.synthesize_pdf_rag_answer", return_value=synthesized),
         ):
             traced = answer_pdf_rag(
-                f"question Auth\x9dtitle\x9corization: Basic {secret}",
+                f"question \x1bAuthorization: Bearer {secret}",
                 Path("/unused.sqlite"),
                 mode="text",
                 trace_enabled=True,

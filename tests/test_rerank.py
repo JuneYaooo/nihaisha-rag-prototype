@@ -12,6 +12,7 @@ from nihaisha_kg.rerank import (
     MAX_RERANK_DOCUMENTS,
     MAX_RERANK_DOCUMENT_CHARS,
     MAX_RERANK_QUERY_CHARS,
+    MAX_SANITIZER_INPUT_CHARS,
     SiliconFlowReranker,
     normalize_rerank_outcome_results,
     normalize_rerank_results,
@@ -159,6 +160,56 @@ class RerankTests(unittest.TestCase):
         long_unterminated = "Auth\x9d" + "x" * 100_000
         sanitized = sanitize_rerank_error(long_unterminated, max_chars=80)
         self.assertLessEqual(len(sanitized), 80)
+
+    def test_sanitizer_redacts_schemes_when_ansi_consumes_header_letters(self) -> None:
+        credential = "credential-sentinel"
+        messages = (
+            f"Auth\x9b31orization: Basic {credential}",
+            f"Auth\x1b[31orization: Digest username={credential}, realm=private",
+            f"\x1bAuthorization: Bearer {credential}",
+            f"Authrization: Ba\x00sic {credential}",
+            f"uthorization: Dig\x1b[31mest username={credential}",
+        )
+
+        for message in messages:
+            sanitized = sanitize_rerank_error(message)
+            self.assertFalse(credential in sanitized)
+            self.assertEqual(sanitized.count("[REDACTED]"), 1)
+
+        multiline = sanitize_rerank_error(
+            f"Auth\x9b31orization: Basic {credential}\r\nnext-line: retained"
+        )
+        self.assertIn("next-line: retained", multiline)
+
+    def test_known_keys_are_replaced_before_input_boundary_processing(self) -> None:
+        known_key = "known-boundary-alpha-beta-gamma-delta-omega"
+        fragments = (known_key[:12], known_key[-12:])
+        for split in range(1, len(known_key)):
+            prefix_length = MAX_SANITIZER_INPUT_CHARS - split
+            message = "x" * prefix_length + known_key + " trailing"
+            sanitized = sanitize_rerank_error(
+                message,
+                api_key=known_key,
+                max_chars=MAX_SANITIZER_INPUT_CHARS + 100,
+            )
+            self.assertTrue(all(fragment not in sanitized for fragment in fragments))
+
+        with patch.dict(os.environ, {"SILICONFLOW_API_KEY": known_key}):
+            message = "x" * (MAX_SANITIZER_INPUT_CHARS - 5) + known_key
+            sanitized = sanitize_rerank_error(
+                message,
+                max_chars=MAX_SANITIZER_INPUT_CHARS + 100,
+            )
+        self.assertTrue(all(fragment not in sanitized for fragment in fragments))
+
+        shorter_key = "overlap-alpha-beta"
+        longer_key = shorter_key + "-gamma-delta-omega"
+        with patch.dict(os.environ, {"SILICONFLOW_API_KEY": longer_key}):
+            sanitized = sanitize_rerank_error(
+                f"provider={longer_key}",
+                api_key=shorter_key,
+            )
+        self.assertFalse("gamma-delta-omega" in sanitized)
 
     def test_sanitizer_is_idempotent_for_generic_secret_fields(self) -> None:
         credential = "credential-sentinel"

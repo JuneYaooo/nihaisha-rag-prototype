@@ -36,7 +36,18 @@ def sanitize_rerank_error(
             raw_message = str(error)
         except Exception:
             raw_message = f"<{type(error).__name__}>"
-    raw_message = raw_message[:MAX_SANITIZER_INPUT_CHARS]
+    known_secrets = sorted(
+        (
+            secret
+            for secret in (api_key, os.getenv("SILICONFLOW_API_KEY"))
+            if isinstance(secret, str) and secret
+        ),
+        key=str.__len__,
+        reverse=True,
+    )
+    for secret in known_secrets:
+        raw_message = raw_message.replace(secret, "[REDACTED]")
+    raw_message = raw_message[: MAX_SANITIZER_INPUT_CHARS + len("[REDACTED]")]
     raw_message = re.sub(
         r"(?:\x1b\]|\x9d)[^\x07\x9c\x1b\r\n]*(?:\x07|\x9c|\x1b\\)",
         "",
@@ -69,11 +80,18 @@ def sanitize_rerank_error(
         r"\g<prefix>[REDACTED]",
         raw_message,
     )
+    raw_message = re.sub(
+        r'''(?ix)
+        (?<![A-Za-z0-9])
+        (?P<scheme>basic|digest|bearer)
+        [ \t]+
+        (?!\[REDACTED\])
+        [^\r\n]+
+        ''',
+        r"\g<scheme> [REDACTED]",
+        raw_message,
+    )
     message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", raw_message)
-    secrets = [api_key, os.getenv("SILICONFLOW_API_KEY")]
-    for secret in secrets:
-        if isinstance(secret, str) and secret:
-            message = message.replace(secret, "[REDACTED]")
     message = re.sub(
         r"(?i)\b(https?://)[^/@\s]+@",
         r"\1[REDACTED]@",
