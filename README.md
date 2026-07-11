@@ -53,6 +53,98 @@ python3 -m nihaisha_kg answer "问题" --mode hybrid --limit 8 --json --trace
 
 先核对 `selected_paragraph_ids`、渠道/排名和降级状态，再回到 citation 中的 PDF 名称、页码与原文摘录。trace 是诊断信息，不是证据。
 
+## 当前图谱 + RAG 逻辑
+
+下面是当前已经实现并发布到本地资产的真实数据流，不包含尚未落地的 GraphRAG 设想：
+
+```text
+Builder（只负责 staging 构建）
+================================
+
+11 份 PDF / 已有资产
+        │
+        ▼
+可移植路径迁移
+绝对路径 ──► pdfs/<文件名>
+        │
+        ▼
+知识结构迁移
+├── paragraphs      ──► evidence_records
+├── documents       ──► source_layer
+└── knowledge_units ──► entities + entity_aliases + relations
+        │
+        ▼
+证据关联／外键／路径／FAISS／baseline 质量门
+        │
+        ▼
+完整资产原子发布
+├── rag.sqlite
+├── manifest.json
+├── vectors.faiss
+├── vector_ids.jsonl
+└── knowledge_structure_report.json
+
+
+Runtime（生产库只读）
+====================
+
+用户问题
+   │
+   ▼
+查询规范化 + 任务识别
+   │
+   ├──────────────┬────────────────┐
+   ▼              ▼                ▼
+Text FTS       Vector          legacy knowledge_units
+trigram        BGE-M3+FAISS    规则知识导航
+   │              │                │
+   └──────────────┴───────┬────────┘
+                          ▼
+                       RRF 融合
+                          │
+                          ▼
+                    可选 reranker
+                          │
+                          ▼
+               原文证据过滤 + 去重
+                          │
+                          ▼
+                   Answer + Citations
+                   ├── evidence_quote：短摘录
+                   ├── paragraph_text：完整原段
+                   ├── source_path/page：来源定位
+                   └── previous/next evidence ID：上下文
+
+
+规范知识结构（独立只读查询）
+================================
+
+documents
+    │ 1:N
+    ▼
+evidence_records ◄── 原始 paragraphs
+    │                ├── previous_evidence_id
+    │                └── next_evidence_id
+    │
+    ├──► entity_aliases ──► entities
+    │                         │
+    └─────────────────────────▼
+                            relations
+                            ├── predicate
+                            ├── evidence_id
+                            ├── confidence
+                            ├── extractor_version
+                            └── review_status
+```
+
+当前边界必须明确：
+
+- 默认 `hybrid` 仍使用 text、vector 和旧 `knowledge_units` 三路召回；新 `relations` **尚未直接加入 RRF 排名**。
+- `knowledge_relations(...)` 可以独立查询新实体和关系，返回对应原文、来源层、定位、置信度、抽取器版本及审核状态。
+- 当前 7,429 条迁移关系全部是 `needs_review`，只能辅助导航，不能自动写成答案事实。
+- 回答的最终证据权威始终是 PDF 原始段落；派生实体或关系不能脱离原文独立引用。
+- 因此当前状态是“证据型知识结构 + RAG”，不是已经人工审核完成的完整知识图谱，也不是全局 GraphRAG。
+
 ## 当前数据与质量基线
 
 `python3 -m nihaisha_kg stats` 当前实测为：11 份文档、5,375 个原文段落、159,286 个检索单元、10,436 个知识图谱单元、19,072 个 guide nodes；dense 向量为 1024 维，FAISS 映射同为 159,286 条。
