@@ -3015,10 +3015,15 @@ class LocalVectorStore:
             }
             if not required <= tables:
                 return []
+            relation_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(relations)")
+            }
+            if "evidence_quote" not in relation_columns:
+                return []
             placeholders = ",".join("?" for _ in entity_terms)
             rows = conn.execute(
                 f"""
-                SELECT r.relation_id, r.predicate, r.literal_value, r.confidence,
+                SELECT r.relation_id, r.predicate, r.literal_value, r.evidence_quote, r.confidence,
                        r.extractor_version, r.review_status, r.source_layer,
                        e.entity_id, e.entity_type, e.canonical_name,
                        ev.evidence_id, ev.previous_evidence_id, ev.next_evidence_id,
@@ -3046,6 +3051,7 @@ class LocalVectorStore:
                     "entity_name": row["canonical_name"],
                     "predicate": row["predicate"],
                     "literal_value": row["literal_value"],
+                    "evidence_quote": row["evidence_quote"],
                     "confidence": row["confidence"],
                     "extractor_version": row["extractor_version"],
                     "review_status": row["review_status"],
@@ -3407,8 +3413,27 @@ def verified_unit_evidence_quotes(result: dict[str, object]) -> list[str]:
     return dedupe_keep_order(quotes)
 
 
+def verified_graph_evidence_quotes(result: dict[str, object]) -> list[str]:
+    paragraph = str(result.get("text", "")).strip()
+    if not paragraph:
+        return []
+    quotes: list[str] = []
+    for relation in result.get("matched_graph_relations", []) or []:
+        if str(relation.get("review_status", "")) not in {"auto_accepted", "reviewed"}:
+            continue
+        quote = str(relation.get("evidence_quote", "")).strip()
+        offset = paragraph.find(quote) if quote else -1
+        if offset >= 0:
+            quotes.append(paragraph[offset : offset + len(quote)])
+    return dedupe_keep_order(quotes)
+
+
 def source_primary_evidence_texts(result: dict[str, object]) -> list[str]:
-    texts = [str(result.get("text", "")).strip(), *verified_unit_evidence_quotes(result)]
+    texts = [
+        str(result.get("text", "")).strip(),
+        *verified_unit_evidence_quotes(result),
+        *verified_graph_evidence_quotes(result),
+    ]
     return [text for text in texts if text]
 
 
@@ -4013,11 +4038,16 @@ def citation_evidence_for_result(
         for quote in verified_unit_evidence_quotes(result):
             if "一钱" in quote or "1钱" in quote or "克" in quote:
                 evidence_parts.append(quote)
+        for quote in verified_graph_evidence_quotes(result):
+            if "一钱" in quote or "1钱" in quote or "克" in quote:
+                evidence_parts.append(quote)
         evidence = " ".join(dedupe_keep_order(evidence_parts))
         if evidence:
             return dosage_evidence_snippet(evidence)
 
-    unit_quotes = verified_unit_evidence_quotes(result)
+    unit_quotes = dedupe_keep_order(
+        [*verified_graph_evidence_quotes(result), *verified_unit_evidence_quotes(result)]
+    )
     paragraph = str(result.get("text", "")).strip()
     if intent == "clinical":
         formula_anchors = reliable_formula_anchors(query)
@@ -4721,7 +4751,7 @@ def answer_pdf_rag(
     candidate_limit = max(limit * 4, 16)
     phase_started = _trace_phase_start(trace_enabled)
     intent = detect_answer_intent(query)
-    initial_plan = build_query_plan(query, intent=intent)
+    initial_plan = [query] if mode == "graph" else build_query_plan(query, intent=intent)
     _trace_phase_finish(latency_ms, "planning", phase_started)
     phase_started = _trace_phase_start(trace_enabled)
     results = run_query_plan_search(
@@ -4734,7 +4764,7 @@ def answer_pdf_rag(
     initial_results = results
     _trace_phase_finish(latency_ms, "retrieval", phase_started)
     phase_started = _trace_phase_start(trace_enabled)
-    followup_plan = [
+    followup_plan = [] if mode == "graph" else [
         planned_query
         for planned_query in build_query_plan(query, intent=intent, seed_results=results)
         if planned_query not in initial_plan

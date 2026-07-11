@@ -39,7 +39,7 @@ class RuntimeKnowledgeStructureTests(unittest.TestCase):
                     CREATE TABLE relations (
                       relation_id TEXT PRIMARY KEY, subject_entity_id TEXT,
                       predicate TEXT, object_entity_id TEXT, literal_value TEXT,
-                      evidence_id TEXT, source_layer TEXT, confidence REAL,
+                      evidence_id TEXT, evidence_quote TEXT, source_layer TEXT, confidence REAL,
                       extraction_method TEXT, extractor_version TEXT,
                       review_status TEXT
                     );
@@ -59,7 +59,7 @@ class RuntimeKnowledgeStructureTests(unittest.TestCase):
                     [("e1", "桂枝汤", "桂枝汤"), ("e2", "渴欲饮", "渴欲饮")],
                 )
                 conn.executemany(
-                    "INSERT INTO relations VALUES (?, ?, 'indicates_pattern', NULL, ?, 'ev1', 'course_primary', 0.8, 'legacy', 'v1', ?)",
+                    "INSERT INTO relations VALUES (?, ?, 'indicates_pattern', NULL, ?, 'ev1', '太阳中风，桂枝汤主之。', 'course_primary', 0.8, 'legacy', 'v1', ?)",
                     [
                         ("r1", "e1", "太阳中风", "auto_accepted"),
                         ("r2", "e1", "不应返回", "rejected"),
@@ -119,6 +119,60 @@ class RuntimeKnowledgeStructureTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(stdout.getvalue().strip(), "[]")
         backend.assert_not_called()
+
+    def test_graph_answer_stays_on_original_entity_without_followup_expansion(self) -> None:
+        graph_quote = "太阳病，头痛发热，无汗而喘者，麻黄汤主之。"
+        result = {
+            "paragraph_id": "p-mahuang",
+            "doc_id": "d1",
+            "source_path": "pdfs/课程讲义.pdf",
+            "title": "课程讲义",
+            "page_start": 53,
+            "page_end": 53,
+            "text": "前文讲解。" * 80 + graph_quote,
+            "score": 0.82,
+            "retrieval_sources": ["graph"],
+            "matched_graph_relations": [
+                {
+                    "entity_name": "麻黄汤",
+                    "predicate": "indicates_pattern",
+                    "literal_value": "太阳中风方证",
+                    "evidence_quote": graph_quote,
+                    "review_status": "auto_accepted",
+                }
+            ],
+            "matched_knowledge_units": [],
+            "matched_units": [],
+            "matched_text_terms": [],
+            "unit_types": [],
+        }
+
+        class FakeStore:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                self.queries: list[str] = []
+
+            def search(self, query: str, limit: int, mode: str) -> list[dict[str, object]]:
+                self.queries.append(query)
+                return [result]
+
+            def search_guide_nodes(self, *_args: object, **_kwargs: object) -> list[dict[str, object]]:
+                return []
+
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore", FakeStore),
+            patch("nihaisha_kg.pdf_vector.build_query_plan", side_effect=AssertionError("no graph expansion")),
+        ):
+            answer = pdf_vector.answer_pdf_rag(
+                "麻黄汤对应什么方证？",
+                Path("unused.sqlite"),
+                mode="graph",
+                limit=3,
+                reranker="none",
+            )
+
+        self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-mahuang"])
+        self.assertEqual(answer["citations"][0]["evidence_quote"], graph_quote)
+        self.assertIn("麻黄汤主之", answer["citations"][0]["paragraph_text"])
 
     def test_knowledge_relations_returns_grounded_non_rejected_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
