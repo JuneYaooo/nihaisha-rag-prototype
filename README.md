@@ -8,9 +8,13 @@
 
 ```bash
 git lfs pull
-python3 -m pip install -e ".[runtime]"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[runtime]"
 cp .env.example .env
 ```
+
+Windows PowerShell 用 `.venv\Scripts\Activate.ps1` 激活环境。后续命令都在已激活的虚拟环境中执行；退出时运行 `deactivate`。
 
 编辑 `.env`，只在本机填写 `SILICONFLOW_API_KEY`，不要提交它。运行需要 SiliconFlow 的命令时，程序会查找当前目录、父目录和模块根目录中最近的 `.env`，按 `KEY=VALUE` 解析（不会作为 shell 脚本执行）；已经导出的同名环境变量优先。也可不把 key 写入文件，改由密码管理器/环境管理工具注入；在 zsh 中可用下面的无回显方式，仅导出到当前 shell，避免写进命令历史：
 
@@ -29,7 +33,7 @@ python3 -m nihaisha_kg answer "木香饼热熨法来自哪一本书哪一段？"
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid
 ```
 
-`doctor` 应返回顶层 `"status": "ok"`。如果系统 Python 因 PEP 668 拒绝安装，请先进入虚拟环境，再原样运行安装命令。若只需精确词句或知识图谱，可不配置 key，改用 `--mode text` 或 `--mode knowledge`。
+`doctor` 应返回顶层 `"status": "ok"`。若只需精确词句或知识图谱，可不配置 key，改用 `--mode text` 或 `--mode knowledge`。
 
 ## 运行规则
 
@@ -76,9 +80,9 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 - context precision@k：先按段落 ID 对排名去重；对前 k 条中每次相关命中累加该名次的 precision@rank，再除以 `min(标注相关 ID 数量, k)`，即 AP@k 风格指标。
 - forbidden hits@10：前 10 条命中明确禁止段落的平均次数，越低越好。
 
-这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。固定追问清单污染已移除，但小样本指标有限，检索仍可能带回无关证据；应检查 trace、PDF 页码和 citation 原文。其他限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及权威古籍原文和外部学术来源尚未入库。
+这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。固定追问清单污染已移除，但小样本指标有限，检索仍可能带回无关证据；应检查 trace、PDF 页码和 citation 原文。其他限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及尚无独立版本化、核验并可结构化识别的权威古籍层或外部学术来源层。
 
-`baseline_v1.json` 顶层 `provenance` 固定记录生成命令、模式/limit、运行时代码提交、embedding、依赖版本及 golden/DB/FAISS/vector IDs 哈希，用于发现用例、代码或资产变化后的陈旧基线。`evaluate` 没有 reranker 阶段，因此 provenance 记为 `none`；查询 embedding 按 DB metadata 自动解析，最终解析到的 provider/model/dim 另行固定记录。原始 CLI 命令只重现 `cases`、`aggregate`、`results`；`provenance` 是审核后稳定附加的元数据，不由 CLI 输出。复现时应比较这三个原始字段，重新计算 golden/vector IDs SHA256，并通过 Git LFS pointer 核对 DB/FAISS OID；不能把旧 provenance 复制到新结果。`tests.test_evaluation` 会持续检查 provenance schema 以及可直接计算的哈希。
+`baseline_v1.json` 顶层 `provenance` 固定记录生成命令、模式/limit、运行时代码提交、embedding、Python/SQLite/运行依赖版本及 golden/DB/FAISS/vector IDs 哈希，用于发现用例、代码或资产变化后的陈旧基线。`evaluate` 没有 reranker 阶段，因此 provenance 记为 `none`；查询 embedding 按 DB metadata 自动解析，最终解析到的 provider/model/dim 另行固定记录。原始 CLI 命令只重现 `cases`、`aggregate`、`results`；`provenance` 是审核后稳定附加的元数据，不由 CLI 输出。复现时应比较这三个原始字段，重新计算 golden/vector IDs SHA256，并通过 Git LFS pointer 核对 DB/FAISS OID；不能把旧 provenance 复制到新结果。`tests.test_evaluation` 会持续检查 provenance schema 以及可直接计算的哈希。
 
 ## 证据分层
 

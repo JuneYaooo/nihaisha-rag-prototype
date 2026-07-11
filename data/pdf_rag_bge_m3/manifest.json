@@ -1,6 +1,6 @@
 {
   "pdf_dir": "external://course-pdfs",
-  "store": "data/pdf_rag_bge_m3/rag.sqlite",
+  "store": "rag.sqlite",
   "embedding": "siliconflow:BAAI/bge-m3",
   "embedding_backend": "siliconflow:BAAI/bge-m3",
   "vector_kind": "dense",
@@ -14,7 +14,7 @@
     "sentence",
     "window"
   ],
-  "trace_dir": "data/pdf_rag_bge_m3/traces",
+  "trace_dir": "traces",
   "documents": [
     {
       "source_path": "pdfs/人纪01针灸视频同步文稿 2024新版.pdf",
@@ -97,9 +97,9 @@
     "symptom": 7121
   },
   "knowledge_extractor_version": "local_rules_v1",
-  "knowledge_trace": "data/pdf_rag_bge_m3/traces/knowledge_units.jsonl",
-  "faiss_index": "data/pdf_rag_bge_m3/vectors.faiss",
-  "faiss_ids": "data/pdf_rag_bge_m3/vector_ids.jsonl",
+  "knowledge_trace": "traces/knowledge_units.jsonl",
+  "faiss_index": "vectors.faiss",
+  "faiss_ids": "vector_ids.jsonl",
   "faiss_vectors": 159286,
   "faiss_dim": 1024
 }

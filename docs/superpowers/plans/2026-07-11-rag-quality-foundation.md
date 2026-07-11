@@ -1594,7 +1594,7 @@ Run:
 python3 -m pip install -e ".[runtime]"
 python3 -m unittest discover -s tests -v
 python3 -m py_compile nihaisha_kg/*.py
-python3 /Users/june/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" .
 python3 -m nihaisha_kg doctor
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10 > evals/baseline_v1.json
 git diff --check

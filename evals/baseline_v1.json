@@ -7,7 +7,7 @@
     "mode": "hybrid",
     "limit": 10,
     "reranker": "none",
-    "code_commit": "34d7e2a67a6cfaf9a8e2d880351c6b042826129d",
+    "code_commit": "e1b3a037e6d870bd1a88b070e7228693149ffb42",
     "embedding": {
       "provider": "SiliconFlow",
       "model": "BAAI/bge-m3",
@@ -16,7 +16,7 @@
     },
     "artifacts": {
       "golden_sha256": "b415d6cfa1aafc951671a44277e5ff103bd46c05b98ac35fe804d34062a57479",
-      "db_lfs_oid_sha256": "6b0ad8d1a1da4a03646190fd695f06d33fc722a2d9248dd76c101bc3fe8abe7e",
+      "db_lfs_oid_sha256": "29e38eb8b60f2793d7a4b926ec08a261b11873b7a45374edc10c1348dfa53548",
       "faiss_lfs_oid_sha256": "18d0bfd9ba247903d4ab75484443783e9c6cfe4ce7067948f74a5ea4b38cf412",
       "vector_ids_sha256": "89b86a26c54a04ee1682cabd806911d95d91136f262a09cbb31224fba8d30470"
     },
@@ -24,7 +24,8 @@
       "python": "3.13.2",
       "faiss-cpu": "1.14.3",
       "numpy": "2.5.1",
-      "requests": "2.32.5"
+      "requests": "2.32.5",
+      "sqlite": "3.49.0"
     }
   },
   "aggregate": {

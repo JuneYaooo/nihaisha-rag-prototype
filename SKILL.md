@@ -11,7 +11,9 @@ Answer from the legacy bundled PDF corpus. Authoritative runtime evidence is a r
 
 ```bash
 git lfs pull
-python3 -m pip install -e ".[runtime]"
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[runtime]"
 python3 -m nihaisha_kg doctor
 ```
 

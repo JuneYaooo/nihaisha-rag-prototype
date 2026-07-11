@@ -407,7 +407,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(baseline["results"]), 7)
         self.assertEqual(provenance["mode"], "hybrid")
         self.assertEqual(provenance["limit"], 10)
-        self.assertEqual(provenance["code_commit"], "34d7e2a67a6cfaf9a8e2d880351c6b042826129d")
+        self.assertEqual(provenance["code_commit"], "e1b3a037e6d870bd1a88b070e7228693149ffb42")
         self.assertEqual(provenance["embedding"]["provider"], "SiliconFlow")
         self.assertEqual(provenance["embedding"]["model"], "BAAI/bge-m3")
         self.assertEqual(provenance["embedding"]["dimensions"], 1024)
@@ -418,7 +418,7 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(
             provenance["artifacts"]["db_lfs_oid_sha256"],
-            "6b0ad8d1a1da4a03646190fd695f06d33fc722a2d9248dd76c101bc3fe8abe7e",
+            "29e38eb8b60f2793d7a4b926ec08a261b11873b7a45374edc10c1348dfa53548",
         )
         self.assertEqual(
             provenance["artifacts"]["faiss_lfs_oid_sha256"],
@@ -433,6 +433,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(provenance["runtime"]["faiss-cpu"], "1.14.3")
         self.assertEqual(provenance["runtime"]["numpy"], "2.5.1")
         self.assertEqual(provenance["runtime"]["requests"], "2.32.5")
+        self.assertEqual(provenance["runtime"]["sqlite"], "3.49.0")
         self.assertEqual(
             hashlib.sha256((root / "evals" / "golden_v1.jsonl").read_bytes()).hexdigest(),
             provenance["artifacts"]["golden_sha256"],
