@@ -32,22 +32,24 @@ Proceed only when `doctor` reports `status: ok`. The 159,286-unit dense producti
 | Questionable citation | rerun `search` or `answer` with `--json --trace`; inspect selected IDs, channels/ranks, reranker degradation, then verify citation PDF/page/quote |
 | Maintainer regression | `python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10` |
 
-CLI reranking defaults to `auto`: it uses SiliconFlow only when a key exists; `--reranker none` disables it. Degradation is sanitized in trace. Search trace is visible with `--json --trace`; answer trace is in answer JSON with those flags. Trace is diagnostic metadata, never evidence.
+CLI reranking defaults to `auto`: it uses SiliconFlow only when a key exists; `--reranker none` disables it. Both search and answer expose trace only with `--json --trace`; plain output does not display it. Trace allowlists diagnostics and does not copy provider credentials, headers, environment dumps, vectors, or full evidence; recognized credential patterns/errors are sanitized. However, `normalized_query` retains query text: never put API keys, passwords, patient/private text, or other secrets in a query. Trace is not evidence or a confidentiality boundary.
 
 ## Evidence policy
 
 1. Cite `course_primary`: retrieved course PDF originals, including PDF/file name, page, and a short exact excerpt. If insufficient, say so; do not fill gaps from memory.
 2. Treat `derived` knowledge triples, guide nodes, query expansions, flows, and follow-ups as navigation only. Never cite them as standalone truth; bind useful clues back to a retrieved original paragraph.
-3. `classic_primary` authoritative classical originals and `reference_secondary` scholarship/web sources are future, separately versioned layers. Material not retrieved from this database must be labeled “external / not retrieved from bundled DB” and must not be presented with bundled-evidence authority.
-4. Cite a lecture claim and a classical original separately. Never silently turn Ni Haixia’s paraphrase into an ancient quotation.
-5. Generate follow-up questions only from the user query and retrieved evidence. Do not inject a fixed diagnostic checklist.
+3. The current runtime has no external/classical retrieval path; bundled answer evidence is course PDFs only. Never reconstruct an absent ancient quotation from model memory.
+4. `classic_primary` authoritative originals and `reference_secondary` scholarship/web sources are future, separately ingested/versioned layers. If the user separately supplies a source or explicitly authorizes external research outside this runtime, label it “external / not retrieved from bundled DB,” verify and cite it separately, and never give it bundled citation authority.
+5. Cite a lecture claim and a classical original separately. Never silently turn Ni Haixia’s paraphrase into an ancient quotation.
+6. Generate follow-up questions only from the user query and retrieved evidence. Do not inject a fixed diagnostic checklist.
 
-Answer with a concise summary, numbered original evidence, relevant evidence-bound clues, and safety boundary. Every factual summary claim needs a citation. For future ingestion/rebuild work use `/Users/june/code/github/nihaisha-rag-builder`; this runtime repository must not mutate the production DB directly.
+Answer with a concise summary, numbered original evidence, relevant evidence-bound clues, and safety boundary. Every factual summary claim needs a citation. For future incremental ingestion/rebuild work use the separate `nihaisha-rag-builder` repository/Skill (often a sibling clone at `../nihaisha-rag-builder`, or a configured path); PDFs need not arrive all at once. Stage, validate, and publish atomically—this runtime repository must not mutate the production DB directly.
 
 ## Common mistakes
 
 - Missing FAISS is an error, not a slow fallback: run `doctor`.
-- Plain `--trace` does not make search trace visible: pair it with `--json`.
+- Plain `--trace` does not display search or answer trace: pair it with `--json`.
+- Query text appears in `normalized_query`; never query with secrets or private text.
 - A graph/guide hit is a route to evidence, not a citable original.
 - External memory is not bundled evidence; label and separate it.
 - Seven evaluation cases are a regression seed, not proof of comprehensive accuracy.

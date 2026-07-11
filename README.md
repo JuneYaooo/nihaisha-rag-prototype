@@ -25,7 +25,7 @@ export SILICONFLOW_API_KEY
 ```bash
 python3 -m nihaisha_kg doctor
 python3 -m nihaisha_kg search "桂枝汤和麻黄汤的方证如何鉴别？" --mode hybrid --limit 8
-python3 -m nihaisha_kg answer "木香饼热熨法来自哪一本书哪一段？" --trace
+python3 -m nihaisha_kg answer "木香饼热熨法来自哪一本书哪一段？" --json --trace
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid
 ```
 
@@ -37,7 +37,8 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid
 - `text` 和 `knowledge` 不调用 embedding API，不需要 key。
 - `vector` 和 `hybrid` 同时需要查询 embedding 后端与 FAISS。推荐 SiliconFlow `BAAI/bge-m3`；离线可选本地后端：`python3 -m pip install -e ".[local]"`，并传 `--embedding local-bge-m3`。
 - CLI 的 `--reranker auto` 仅在存在 `SILICONFLOW_API_KEY` 时调用 SiliconFlow reranker；`--reranker none` 明确关闭。服务失败时会保留召回结果，并在 trace 中给出已脱敏的降级状态。
-- 普通文本输出保持兼容。程序化检查使用 JSON：`search ... --json --trace` 给出召回渠道/各渠道排名、最终选中段落 ID、reranker 模型/降级状态和搜索延迟；`answer ... --json --trace` 的回答 JSON 还给出分组的初始/追问计划、各计划观察结果的排名与渠道，以及各阶段延迟。两类 trace 都绝不包含 key、请求头、向量或完整证据正文。
+- 普通文本输出保持兼容，但 `search` 和 `answer` 的纯文本输出都不显示 trace；必须同时传 `--json --trace`。搜索 trace 给出召回渠道/各渠道排名、最终选中段落 ID、reranker 模型/降级状态和搜索延迟；回答 trace 还给出分组的初始/追问计划、各计划观察结果的排名与渠道，以及各阶段延迟。
+- trace 采用诊断字段白名单，不主动复制 provider 凭据、请求头、环境变量转储、向量或完整证据正文；已识别的凭据模式和 reranker 错误会脱敏。但 `normalized_query` 有意保留用户查询文本，脱敏不是保密保证：**绝不要把 API key、密码、患者隐私或其他私密文本写进查询**。
 
 当引用可疑、结果串题或需要复核排序时：
 
@@ -58,15 +59,15 @@ python3 -m nihaisha_kg answer "问题" --mode hybrid --limit 8 --json --trace
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10
 ```
 
-本次基线聚合值：Recall@5 = **0.4761904762**，Recall@10 = **0.5238095238**，MRR（`reciprocal_rank`）= **0.4047619048**，nDCG@10 = **0.3908372076**，context precision@10 = **0.3190476190**，forbidden hits@10 = **0.0**。
+以下小数是从 `evals/baseline_v1.json` 中的原始浮点值四舍五入后展示，并非声明精确相等：Recall@5 ≈ **0.4761904762**，Recall@10 ≈ **0.5238095238**，MRR（`reciprocal_rank`）≈ **0.4047619048**，nDCG@10 ≈ **0.3908372076**，context precision@10 ≈ **0.3190476190**，forbidden hits@10 ≈ **0.0**。
 
 - Recall@k：前 k 条覆盖了多少标注相关段落。
 - MRR：第一个相关段落排名倒数的平均值，越高表示首次命中越靠前。
 - nDCG@10：考虑相关结果排序位置的折损收益。
-- context precision@10：相关段落在前 10 条中的排序精度。
+- context precision@k：先按段落 ID 对排名去重；对前 k 条中每次相关命中累加该名次的 precision@rank，再除以 `min(标注相关 ID 数量, k)`，即 AP@k 风格指标。
 - forbidden hits@10：前 10 条命中明确禁止段落的平均次数，越低越好。
 
-这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。现阶段限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及权威古籍原文和外部学术来源尚未入库。
+这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。固定追问清单污染已移除，但小样本指标有限，检索仍可能带回无关证据；应检查 trace、PDF 页码和 citation 原文。其他限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及权威古籍原文和外部学术来源尚未入库。
 
 ## 证据分层
 
@@ -79,11 +80,13 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 | `reference_secondary` | 未来入库，权威级别较低 | 学术研究、参考书和网页材料，只作补充 |
 | `derived` | 部分已入库 | 图谱三元组、guide nodes、查询扩展，仅用于导航，不可独立作为事实依据 |
 
-未来古籍或网页证据记录至少要保存：题名与版本/网站、卷/章/行或稳定定位、稳定 URL/来源、访问日期、许可与版本、逐字引文、对应课程提及的链接、置信度和审核状态。课程主张与古籍原文必须分别引用；不得把倪海厦的转述无标记地写成古籍原句。尚未进入本库的外部/古籍材料必须标为“外部材料（本库未检索）”，不能冒充 bundled evidence。
+当前运行时**没有外部网页或古籍检索路径**，bundled answer evidence 只有课程 PDF。古籍原句未在库中检索到时，绝不能用模型记忆补写。只有当用户另行提供外部来源，或明确授权在本运行时之外研究时，才可把所得材料标为“外部材料（本库未检索）”，单独核验和引用；它不能共用 bundled citation 编号或获得课程 PDF 的证据权威。
+
+未来古籍或网页证据记录至少要保存：题名与版本/网站、卷/章/行或稳定定位、稳定 URL/来源、访问日期、许可与版本、逐字引文、对应课程提及的链接、置信度和审核状态。课程主张与古籍原文必须分别引用；不得把倪海厦的转述无标记地写成古籍原句。只有未来正式摄取、版本化并审核后，材料才可进入 `classic_primary` 或 `reference_secondary` 层。
 
 ## 新增资料与发布
 
-以后可通过 `/Users/june/code/github/nihaisha-rag-builder` 增量加入 PDF，用户不必一次提供全部资料。构建端负责抽取、规范化、生成向量与索引、验证，并以 staging → 校验 → 原子发布的方式替换成套产物；本运行时仓库不直接修改生产数据库。新增资料仍受 OCR、版权/许可和人工复核质量约束。
+以后可在独立的 `nihaisha-rag-builder` 仓库/Skill 中增量加入 PDF；若它是同级 clone，路径通常为 `../nihaisha-rag-builder`，也可使用实际配置路径。用户不必一次提供全部资料。构建端负责抽取、规范化、生成向量与索引、验证，并以 staging → 校验 → 原子发布的方式替换成套产物；本运行时仓库不直接修改生产数据库。新增资料仍受 OCR、版权/许可和人工复核质量约束。
 
 ## 安全边界
 
