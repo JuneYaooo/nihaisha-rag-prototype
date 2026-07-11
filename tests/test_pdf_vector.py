@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 from nihaisha_kg import pdf_vector
 from nihaisha_kg import cli as rag_cli
@@ -147,7 +148,7 @@ class PdfVectorTests(unittest.TestCase):
             "file:C:/Users/alice/private/本草.pdf": "pdfs/本草.pdf",
             "https://example.test/course/%E9%BB%84%E5%B8%9D%E5%86%85%E7%BB%8F.pdf":
                 "pdfs/黄帝内经.pdf",
-            "https://example.test/course/%2E%2E%2Fodd%5Cname.pdf": "pdfs/odd_name.pdf",
+            "https://example.test/course/%2E%2E%2Fodd%5Cname.pdf": "pdfs/name.pdf",
             "https://example.test/course/%252E%252E%252Fdouble.pdf": "pdfs/double.pdf",
             "https://example.test/course/%00%1Fcontrol.pdf": "pdfs/control.pdf",
             f"https://example.test/course/?signed={sentinel}#{sentinel}": "pdfs/source.pdf",
@@ -185,10 +186,48 @@ class PdfVectorTests(unittest.TestCase):
             "课程/pdfs/针灸.pdf",
         )
 
+    def test_public_source_path_decodes_whole_path_before_selecting_basename(self) -> None:
+        sentinel = "ENCODED_PRIVATE_SENTINEL"
+        posix = "/Users/alice/private/secret.pdf"
+        windows = r"C:\Users\alice\private\secret.pdf"
+        encoded_uri = quote(
+            f"https://alice:{sentinel}@private.example/{posix.lstrip('/')}"
+            f"?signature={sentinel}#{sentinel}",
+            safe="",
+        )
+        encoded_uri_path = quote(quote(posix, safe=""), safe="")
+        cases = (
+            quote(posix, safe=""),
+            quote(quote(posix, safe=""), safe=""),
+            quote(windows, safe=""),
+            quote(quote(windows, safe=""), safe=""),
+            encoded_uri,
+            f"https://public.example/{encoded_uri_path}?signature={sentinel}#{sentinel}",
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                public = pdf_vector.public_source_path(source)
+                self.assertEqual(public, "pdfs/secret.pdf")
+                for private in ("Users", "alice", "private", sentinel):
+                    self.assertNotIn(private, public)
+
+        excessive = posix
+        for _ in range(10):
+            excessive = quote(excessive, safe="")
+        self.assertEqual(pdf_vector.public_source_path(excessive), "pdfs/source.pdf")
+        self.assertEqual(
+            pdf_vector.public_source_path("/Users/alice/" + "x" * 9000 + "/secret.pdf"),
+            "pdfs/source.pdf",
+        )
+
     def test_public_search_modes_and_answer_hide_absolute_source_roots(self) -> None:
         sentinel = "URI_SECRET_SENTINEL"
+        encoded_private_path = quote(
+            quote("/Users/alice/private/伤寒论.pdf", safe=""),
+            safe="",
+        )
         private_source = (
-            f"https://alice:{sentinel}@private.example:8443/course/伤寒论.pdf"
+            f"https://alice:{sentinel}@private.example:8443/{encoded_private_path}"
             f"?signature={sentinel}#{sentinel}"
         )
         paragraph = ParsedParagraph(

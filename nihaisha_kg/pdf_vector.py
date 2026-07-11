@@ -375,36 +375,50 @@ def public_source_path(source_path: object) -> str:
     if not raw:
         return ""
 
-    def decode_component(value: str) -> tuple[str, bool]:
+    def decode_path(value: str) -> str | None:
+        if len(value) > 8192:
+            return None
         decoded = value
         for _ in range(8):
             next_value = unquote(decoded, errors="replace")
+            if len(next_value) > 8192:
+                return None
             if next_value == decoded:
-                return decoded, False
+                return decoded
             decoded = next_value
-        return decoded, bool(re.search(r"%[0-9A-Fa-f]{2}", decoded))
+        if re.search(r"%[0-9A-Fa-f]{2}", decoded):
+            return None
+        return decoded
 
     def safe_basename(value: str) -> str:
-        decoded, unresolved_encoding = decode_component(value)
-        if unresolved_encoding:
-            return "source.pdf"
-        decoded = re.split(r"[?#]", decoded, maxsplit=1)[0]
-        decoded = decoded.replace("/", "_").replace("\\", "_")
-        decoded = "".join(
+        cleaned = re.split(r"[?#]", value, maxsplit=1)[0]
+        cleaned = cleaned.replace("/", "_").replace("\\", "_")
+        cleaned = "".join(
             character
-            for character in decoded
+            for character in cleaned
             if not unicodedata.category(character).startswith("C")
         )
-        decoded = decoded.strip().lstrip("._ ")
-        return decoded if decoded not in {"", ".", ".."} else "source.pdf"
+        cleaned = cleaned.strip().lstrip("._ ")
+        return cleaned if cleaned not in {"", ".", ".."} else "source.pdf"
 
-    windows_drive = bool(re.match(r"^[A-Za-z]:", raw))
-    uri_scheme = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", raw))
+    decoded_raw = decode_path(raw)
+    if decoded_raw is None:
+        return "pdfs/source.pdf"
+    introduced_separator = (
+        decoded_raw.count("/") > raw.count("/")
+        or decoded_raw.count("\\") > raw.count("\\")
+    )
+
+    windows_drive = bool(re.match(r"^[A-Za-z]:", decoded_raw))
+    uri_scheme = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", decoded_raw))
     if uri_scheme and not windows_drive:
         try:
-            parsed_path = urlsplit(raw).path.replace("\\", "/")
+            uri_path = decode_path(urlsplit(decoded_raw).path)
         except (UnicodeError, ValueError):
             return "pdfs/source.pdf"
+        if uri_path is None:
+            return "pdfs/source.pdf"
+        parsed_path = re.sub(r"/{2,}", "/", uri_path.replace("\\", "/"))
         uri_basename = (
             parsed_path.rsplit("/", 1)[-1]
             if parsed_path and not parsed_path.endswith("/")
@@ -412,39 +426,36 @@ def public_source_path(source_path: object) -> str:
         )
         return f"pdfs/{safe_basename(uri_basename)}"
 
-    slash_normalized = raw.replace("\\", "/")
+    slash_normalized = decoded_raw.replace("\\", "/")
     normalized = re.sub(r"/{2,}", "/", slash_normalized)
     parts = [part for part in normalized.split("/") if part not in {"", "."}]
     basename = safe_basename(parts[-1] if parts else "")
     is_absolute = slash_normalized.startswith("/") or windows_drive
-    decoded_parts: list[str] = []
-    is_unsafe_relative = False
+    is_unsafe_relative = introduced_separator
+    normalized_parts: list[str] = []
     for index, part in enumerate(parts):
-        decoded, unresolved_encoding = decode_component(part)
-        decoded = decoded.strip()
+        normalized_part = part.strip()
         has_control = any(
-            unicodedata.category(character).startswith("C") for character in decoded
+            unicodedata.category(character).startswith("C")
+            for character in normalized_part
         )
         decoded_scheme_prefix = index == 0 and bool(
-            re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", decoded)
+            re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", normalized_part)
         )
         if (
-            not decoded
-            or decoded in {".", "..", "~"}
-            or decoded.startswith("~")
-            or "/" in decoded
-            or "\\" in decoded
-            or "?" in decoded
-            or "#" in decoded
+            not normalized_part
+            or normalized_part in {".", "..", "~"}
+            or normalized_part.startswith("~")
+            or "?" in normalized_part
+            or "#" in normalized_part
             or has_control
-            or unresolved_encoding
             or decoded_scheme_prefix
         ):
             is_unsafe_relative = True
-        decoded_parts.append(decoded)
+        normalized_parts.append(normalized_part)
     if is_absolute or is_unsafe_relative:
         return f"pdfs/{basename}"
-    return "/".join([*decoded_parts[:-1], basename])
+    return "/".join([*normalized_parts[:-1], basename])
 
 
 def is_guide_source_text(text: str) -> bool:
