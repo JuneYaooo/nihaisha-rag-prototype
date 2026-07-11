@@ -2117,15 +2117,19 @@ class PdfVectorTests(unittest.TestCase):
             "text": "患者发热口渴，白虎汤主之。",
         }
 
-        answer = synthesize_pdf_rag_answer(
-            "患者发热口渴，白虎加人参汤如何理解？",
-            [shorter, compound],
-        )
+        for suffix in ("开什么方", "是什么方", "怎么理解", "如何理解"):
+            with self.subTest(suffix=suffix):
+                query = f"患者发热口渴，白虎加人参汤{suffix}？"
+                self.assertEqual(pdf_vector.reliable_formula_anchors(query), ["白虎加人参汤"])
 
-        self.assertIn("方名包括：白虎加人参汤。", answer["answer"])
-        self.assertNotIn("方名包括：白虎汤", answer["answer"])
-        self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-compound"])
-        self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
+                answer = synthesize_pdf_rag_answer(query, [shorter, compound])
+
+                self.assertIn("方名包括：白虎加人参汤。", answer["answer"])
+                self.assertNotIn("方名包括：白虎汤", answer["answer"])
+                self.assertEqual(
+                    [item["paragraph_id"] for item in answer["citations"]], ["p-compound"]
+                )
+                self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
 
     def test_clinical_direct_curated_formula_still_works_without_explicit_unknown(self) -> None:
         result = {

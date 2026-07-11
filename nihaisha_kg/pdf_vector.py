@@ -256,7 +256,8 @@ KNOWN_FORMULA_ANCHORS = frozenset(
 FORMULA_LEFT_QUERY_PREFIXES = ("请问", "关于", "查询", "和", "与", "、")
 FORMULA_RIGHT_QUERY_SUFFIXES = (
     "的出处", "出处", "原文", "哪本书", "哪一页", "方证", "主治", "对应",
-    "如何", "鉴别", "比较", "区别", "和", "与", "、",
+    "开什么方", "是什么方", "怎么理解", "如何理解", "如何",
+    "鉴别", "比较", "区别", "和", "与", "、",
 )
 EXPLICIT_FORMULA_RIGHT_QUERY_SUFFIXES = (
     *FORMULA_RIGHT_QUERY_SUFFIXES, "是什么方", "开什么方", "如何理解", "怎么理解", "见于哪里",
