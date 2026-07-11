@@ -3959,11 +3959,81 @@ def build_citations(
                 "page_end": result.get("page_end", result.get("page_start", "")),
                 "label": citation_label({**result, "source_path": source_path}),
                 "evidence_quote": evidence,
+                "paragraph_text": str(result.get("text", "")),
+                "previous_evidence_id": result.get("previous_evidence_id", ""),
+                "next_evidence_id": result.get("next_evidence_id", ""),
             }
         )
         if len(citations) >= max_citations:
             break
     return citations
+
+
+def knowledge_relations(
+    db_path: Path | str,
+    entity_name: str,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    """Return evidence-grounded relation candidates from the normalized schema."""
+    bounded_limit = min(max(int(limit), 0), 100)
+    normalized_name = normalize_whitespace(entity_name).casefold()
+    path = Path(db_path)
+    if not normalized_name or bounded_limit == 0 or not path.is_file():
+        return []
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        required = {"documents", "evidence_records", "entities", "relations"}
+        if not required <= tables:
+            return []
+        rows = conn.execute(
+            """
+            SELECT r.relation_id, e.entity_id, e.entity_type, e.canonical_name,
+                   r.predicate, r.literal_value, r.confidence,
+                   r.extraction_method, r.extractor_version, r.review_status,
+                   r.source_layer, ev.evidence_id, ev.paragraph_id, ev.locator,
+                   ev.original_text, ev.previous_evidence_id, ev.next_evidence_id,
+                   d.canonical_title, d.logical_source_path
+            FROM entities e
+            JOIN relations r ON r.subject_entity_id = e.entity_id
+            JOIN evidence_records ev ON ev.evidence_id = r.evidence_id
+            JOIN documents d ON d.document_id = ev.document_id
+            WHERE e.normalized_key = ? AND r.review_status != 'rejected'
+            ORDER BY CASE r.review_status WHEN 'reviewed' THEN 0 ELSE 1 END,
+                     r.confidence DESC, r.relation_id
+            LIMIT ?
+            """,
+            (normalized_name, bounded_limit),
+        ).fetchall()
+    return [
+        {
+            "relation_id": row["relation_id"],
+            "entity_id": row["entity_id"],
+            "entity_type": row["entity_type"],
+            "entity_name": row["canonical_name"],
+            "predicate": row["predicate"],
+            "literal_value": row["literal_value"],
+            "confidence": row["confidence"],
+            "extraction_method": row["extraction_method"],
+            "extractor_version": row["extractor_version"],
+            "review_status": row["review_status"],
+            "source_layer": row["source_layer"],
+            "evidence_id": row["evidence_id"],
+            "paragraph_id": row["paragraph_id"],
+            "locator": row["locator"],
+            "paragraph_text": row["original_text"],
+            "previous_evidence_id": row["previous_evidence_id"] or "",
+            "next_evidence_id": row["next_evidence_id"] or "",
+            "title": row["canonical_title"],
+            "source_path": public_source_path(row["logical_source_path"]),
+        }
+        for row in rows
+    ]
 
 
 def result_evidence_text(result: dict[str, object]) -> str:
