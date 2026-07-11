@@ -86,12 +86,14 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 
 | 层级 | 当前状态 | 用法 |
 | --- | --- | --- |
-| `course_primary` | 已入库 | 当前运行时答案的主证据：课程 PDF 原文、书名/文件名、页码和摘录 |
-| `classic_primary` | 未来单独版本化入库 | 讲课中引用或提及的权威古籍原文；与课程转述分别引用 |
+| `course_primary` | 运行时策略，尚无结构化字段 | 当前运行时答案以检索到的 PDF 原文段落、文件名、页码和摘录为主证据 |
+| `classic_primary` | 尚未实现独立版本化层 | 未来保存经版本核验的权威古籍原文，并与课程转述分别引用 |
 | `reference_secondary` | 未来入库，权威级别较低 | 学术研究、参考书和网页材料，只作补充 |
-| `derived` | 部分已入库 | 图谱三元组、guide nodes、查询扩展，仅用于导航，不可独立作为事实依据 |
+| `derived` | 已有派生数据但无 `evidence_layer` 字段 | 图谱三元组、guide nodes、查询扩展仅用于导航；答案合成不把其 subject/object 当作事实或方名 |
 
-当前运行时**没有外部网页或古籍检索路径**，bundled answer evidence 只有课程 PDF。古籍原句未在库中检索到时，绝不能用模型记忆补写。只有当用户另行提供外部来源，或明确授权在本运行时之外研究时，才可把所得材料标为“外部材料（本库未检索）”，单独核验和引用；它不能共用 bundled citation 编号或获得课程 PDF 的证据权威。
+当前 SQLite 没有结构化 `evidence_layer` 列；11 份 PDF（包括 `黄帝内经原文和翻译.pdf`）仍是同一个 legacy bundled corpus，因此运行时目前不能从结构上强制区分 `course_primary` 与 `classic_primary`。答案权威来自检索到的 PDF 原文段落，而不是派生图谱字段；但这不等于库中完全没有古籍原文或翻译材料。尚未实现的是**单独版本化、核验并可结构化识别的权威古籍层**。第二阶段 builder migration 将按文档分类并写入证据层。
+
+当前运行时没有外部网页检索路径。原文未在 bundled corpus 中检索到时，绝不能用模型记忆补写。只有当用户另行提供外部来源，或明确授权在本运行时之外研究时，才可把所得材料标为“外部材料（本库未检索）”，单独核验和引用；它不能共用 bundled citation 编号或获得 PDF 原文段落的证据权威。
 
 未来古籍或网页证据记录至少要保存：题名与版本/网站、卷/章/行或稳定定位、稳定 URL/来源、访问日期、许可与版本、逐字引文、对应课程提及的链接、置信度和审核状态。课程主张与古籍原文必须分别引用；不得把倪海厦的转述无标记地写成古籍原句。只有未来正式摄取、版本化并审核后，材料才可进入 `classic_primary` 或 `reference_secondary` 层。
 

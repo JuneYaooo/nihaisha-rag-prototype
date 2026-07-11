@@ -14,6 +14,9 @@ from nihaisha_kg.evaluation import (
     evaluate_database,
     evaluate_ranked_ids,
     load_eval_cases,
+    MAX_EVALUATION_JSONL_LINE_BYTES,
+    MAX_EVALUATION_QUERY_CHARS,
+    MAX_EVALUATION_ID_LIST_ITEMS,
 )
 
 
@@ -125,6 +128,49 @@ class EvaluationTests(unittest.TestCase):
 
         self.assert_invalid_eval_jsonl(content, physical_line=3)
 
+    def test_load_eval_cases_rejects_oversized_line_before_json_decode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "eval.jsonl"
+            path.write_bytes(b"{" + b"x" * MAX_EVALUATION_JSONL_LINE_BYTES + b"}\n")
+
+            with self.assertRaisesRegex(ValueError, rf"{re.escape(str(path))}:1:.*line exceeds"):
+                load_eval_cases(path)
+
+    def test_load_eval_cases_rejects_invalid_utf8_without_echoing_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "eval.jsonl"
+            path.write_bytes(b'{"case_id":"secret-' + b"\xff" + b'"}\n')
+
+            with self.assertRaisesRegex(ValueError, rf"{re.escape(str(path))}:1: invalid UTF-8") as caught:
+                load_eval_cases(path)
+
+            self.assertNotIn("secret", str(caught.exception))
+
+    def test_load_eval_cases_bounds_queries_ids_and_id_lists(self) -> None:
+        valid = {
+            "case_id": "case-1",
+            "query": "query",
+            "task_type": "source_lookup",
+            "relevant_paragraph_ids": ["p1"],
+        }
+        invalid_records = {
+            "query": {**valid, "query": "q" * (MAX_EVALUATION_QUERY_CHARS + 1)},
+            "case id": {**valid, "case_id": "c" * 257},
+            "task type": {**valid, "task_type": "t" * 257},
+            "paragraph id": {**valid, "relevant_paragraph_ids": ["p" * 257]},
+            "relevant count": {
+                **valid,
+                "relevant_paragraph_ids": [f"p-{index}" for index in range(MAX_EVALUATION_ID_LIST_ITEMS + 1)],
+            },
+            "forbidden count": {
+                **valid,
+                "forbidden_paragraph_ids": [f"x-{index}" for index in range(MAX_EVALUATION_ID_LIST_ITEMS + 1)],
+            },
+        }
+        for label, record in invalid_records.items():
+            with self.subTest(label=label):
+                self.assert_invalid_eval_jsonl(json.dumps(record, ensure_ascii=False) + "\n")
+
     def test_evaluate_ranked_ids_deduplicates_at_first_occurrence(self) -> None:
         case = EvalCase(
             case_id="case-1",
@@ -207,7 +253,7 @@ class EvaluationTests(unittest.TestCase):
 
         store = NoSearchStore()
         case = EvalCase("one", "query", "lookup", ("p1",))
-        for invalid_limit in (True, 0, -1, 1.5, "10"):
+        for invalid_limit in (True, 0, -1, 1.5, "10", 101, 10**50):
             with self.subTest(limit=invalid_limit):
                 with self.assertRaises((TypeError, ValueError)):
                     evaluate_database(store, [case], mode="text", limit=invalid_limit)  # type: ignore[arg-type]
@@ -215,6 +261,19 @@ class EvaluationTests(unittest.TestCase):
             with self.subTest(mode=invalid_mode):
                 with self.assertRaises((TypeError, ValueError)):
                     evaluate_database(store, [case], mode=invalid_mode)  # type: ignore[arg-type]
+
+        calls = 0
+
+        class BoundedStore:
+            def search(self, *_args: object, **kwargs: object) -> list[dict[str, object]]:
+                nonlocal calls
+                calls += 1
+                self.limit = kwargs["limit"]
+                return []
+
+        bounded_store = BoundedStore()
+        evaluate_database(bounded_store, [case], mode="text", limit=100)
+        self.assertEqual((calls, bounded_store.limit), (1, 100))
 
     def test_evaluate_database_consumes_at_most_limit_search_rows(self) -> None:
         pulls = 0

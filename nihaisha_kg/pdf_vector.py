@@ -250,6 +250,7 @@ KNOWN_FORMULA_ANCHORS = frozenset(
         "小建中汤", "十枣汤", "大柴胡汤", "小青龙汤", "大青龙汤", "吴茱萸汤",
         "当归四逆汤", "苓桂术甘汤", "茵陈蒿汤", "越婢汤", "旋覆代赭汤",
         "麦门冬汤", "木防己汤", "百合知母汤", "五苓散", "肾气丸", "麻子仁丸",
+        "乌头桂枝汤",
     }
 )
 FORMULA_LEFT_QUERY_PREFIXES = ("请问", "关于", "查询", "和", "与", "、")
@@ -258,6 +259,10 @@ FORMULA_RIGHT_QUERY_SUFFIXES = (
     "如何", "鉴别", "比较", "区别", "和", "与", "、",
 )
 MAX_RUNTIME_META_VALUE_CHARS = 4096
+MAX_PUBLIC_ANSWER_LIMIT = 100
+MAX_INTERNAL_SEARCH_LIMIT = 400
+MAX_VECTOR_UNIT_LIMIT = 400
+MAX_SQLITE_IN_ITEMS = 900
 NAMED_RIGHT_QUERY_SUFFIXES = (
     *FORMULA_RIGHT_QUERY_SUFFIXES, "的原文", "热熨法", "是", "多少", "几克", "换算"
 )
@@ -268,6 +273,16 @@ NAMED_EVIDENCE_INVALID_CONTINUATIONS = {
     "太阳病": ("人",),
     "一钱": ("包",),
 }
+
+
+def validate_runtime_limit(value: object, name: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    if value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -2131,6 +2146,7 @@ class LocalVectorStore:
         return {"db_path": str(self.db_path), "guide_nodes": len(nodes)}
 
     def search_guide_nodes(self, query: str, limit: int = 8) -> list[dict[str, object]]:
+        validate_runtime_limit(limit, "limit", MAX_PUBLIC_ANSWER_LIMIT)
         if not self.db_path.exists():
             return []
         with self.connect() as conn:
@@ -2469,6 +2485,8 @@ class LocalVectorStore:
         unit_limit: int = 80,
         faiss_module: object | None = None,
     ) -> list[dict[str, object]]:
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        validate_runtime_limit(unit_limit, "unit_limit", MAX_VECTOR_UNIT_LIMIT)
         vector_kind = self.embedding_backend.vector_kind
         stored_vector_kind = self.read_meta_keys(("vector_kind",)).get("vector_kind")
         if stored_vector_kind and stored_vector_kind != vector_kind:
@@ -2567,7 +2585,7 @@ class LocalVectorStore:
             unit_ids,
         ):
             return None
-        top_k = min(len(unit_ids), max(unit_limit, limit * 20))
+        top_k = min(len(unit_ids), MAX_SQLITE_IN_ITEMS, max(unit_limit, limit * 20))
         try:
             scores, indices = index.search(faiss_matrix([query_vector]), top_k)
         except Exception:  # unusable FAISS indexes must not bypass the scan guard
@@ -2687,6 +2705,8 @@ class LocalVectorStore:
         return results
 
     def search_text(self, query: str, limit: int = 8, candidate_limit: int = 200) -> list[dict[str, object]]:
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        validate_runtime_limit(candidate_limit, "candidate_limit", MAX_INTERNAL_SEARCH_LIMIT)
         terms = text_search_terms(query)
         if not terms:
             return []
@@ -2797,6 +2817,8 @@ class LocalVectorStore:
         limit: int = 8,
         candidate_limit: int = 200,
     ) -> list[dict[str, object]]:
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        validate_runtime_limit(candidate_limit, "candidate_limit", MAX_INTERNAL_SEARCH_LIMIT)
         terms = knowledge_search_terms(query)
         if not terms or not self.has_knowledge_index():
             return []
@@ -2960,9 +2982,14 @@ class LocalVectorStore:
         unit_limit: int = 120,
         text_limit: int = 80,
     ) -> list[dict[str, object]]:
-        vector_results = self.search_vector(query, limit=max(limit * 4, 16), unit_limit=unit_limit)
-        text_results = self.search_text(query, limit=max(text_limit, limit * 4))
-        knowledge_results = self.search_knowledge_units(query, limit=max(text_limit, limit * 4))
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        validate_runtime_limit(unit_limit, "unit_limit", MAX_VECTOR_UNIT_LIMIT)
+        validate_runtime_limit(text_limit, "text_limit", MAX_INTERNAL_SEARCH_LIMIT)
+        vector_limit = min(MAX_INTERNAL_SEARCH_LIMIT, max(limit * 4, 16))
+        text_channel_limit = min(MAX_INTERNAL_SEARCH_LIMIT, max(text_limit, limit * 4))
+        vector_results = self.search_vector(query, limit=vector_limit, unit_limit=unit_limit)
+        text_results = self.search_text(query, limit=text_channel_limit)
+        knowledge_results = self.search_knowledge_units(query, limit=text_channel_limit)
         return fuse_ranked_channels(
             {
                 "vector": vector_results,
@@ -2979,6 +3006,8 @@ class LocalVectorStore:
         unit_limit: int = 120,
         mode: str = "hybrid",
     ) -> list[dict[str, object]]:
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        validate_runtime_limit(unit_limit, "unit_limit", MAX_VECTOR_UNIT_LIMIT)
         if mode == "vector":
             return self.search_vector(query, limit=limit, unit_limit=unit_limit)
         if mode == "text":
@@ -3099,16 +3128,31 @@ def reliable_formula_anchors(query: str) -> list[str]:
 
 
 def known_formula_terms_in_evidence(text: str) -> list[str]:
+    found = _longest_known_formula_occurrences(text)
+    return dedupe_keep_order(formula for _, _, formula in found)
+
+
+def _longest_known_formula_occurrences(text: str) -> list[tuple[int, int, str]]:
     normalized = normalize_query_text(text)
-    found: list[tuple[int, str]] = []
+    occurrences: list[tuple[int, int, str]] = []
     for formula in sorted(KNOWN_FORMULA_ANCHORS, key=lambda item: (-len(item), item)):
         offset = normalized.find(formula)
         while offset >= 0:
-            right = normalized[offset + len(formula) :]
+            end = offset + len(formula)
+            right = normalized[end:]
             if not any(right.startswith(continuation) for continuation in FORMULA_PRODUCT_CONTINUATIONS):
-                found.append((offset, formula))
+                occurrences.append((offset, end, formula))
             offset = normalized.find(formula, offset + 1)
-    return dedupe_keep_order(formula for _, formula in sorted(found))
+    selected: list[tuple[int, int, str]] = []
+    for occurrence in sorted(occurrences, key=lambda item: (item[0], -len(item[2]), item[2])):
+        start, end, _ = occurrence
+        if any(
+            kept_start <= start and end <= kept_end and (kept_end - kept_start) > (end - start)
+            for kept_start, kept_end, _ in occurrences
+        ):
+            continue
+        selected.append(occurrence)
+    return selected
 
 
 def validated_source_anchor_spans(
@@ -3117,14 +3161,16 @@ def validated_source_anchor_spans(
 ) -> dict[str, list[tuple[int, int]]]:
     normalized = normalize_query_text(text)
     validated: dict[str, list[tuple[int, int]]] = {}
+    formula_occurrences = _longest_known_formula_occurrences(normalized)
     for anchor in dedupe_keep_order(anchors):
         if anchor not in KNOWN_FORMULA_ANCHORS and anchor not in RELIABLE_SOURCE_NAMED_TERMS:
             continue
-        invalid_continuations = (
-            FORMULA_PRODUCT_CONTINUATIONS
-            if anchor in KNOWN_FORMULA_ANCHORS
-            else NAMED_EVIDENCE_INVALID_CONTINUATIONS.get(anchor, ())
-        )
+        if anchor in KNOWN_FORMULA_ANCHORS:
+            spans = [(start, end) for start, end, formula in formula_occurrences if formula == anchor]
+            if spans:
+                validated[anchor] = spans
+            continue
+        invalid_continuations = NAMED_EVIDENCE_INVALID_CONTINUATIONS.get(anchor, ())
         offset = normalized.find(anchor)
         spans: list[tuple[int, int]] = []
         while offset >= 0:
@@ -3154,6 +3200,10 @@ def source_primary_evidence_texts(result: dict[str, object]) -> list[str]:
         for unit in result.get("matched_knowledge_units", []) or []
     )
     return [text for text in texts if text]
+
+
+def primary_evidence_text(result: dict[str, object]) -> str:
+    return "\n".join(source_primary_evidence_texts(result))
 
 
 def reliable_source_anchors(query: str) -> list[str]:
@@ -3504,39 +3554,18 @@ def canonical_clinical_clues(text: str) -> list[str]:
 
 
 def is_clinical_relevant_result(result: dict[str, object]) -> bool:
-    evidence = result_evidence_text(result)
-    formulas = extract_formula_terms(evidence)
+    evidence = primary_evidence_text(result)
+    formulas = known_formula_terms_in_evidence(evidence)
     clues = clinical_evidence_clues(evidence)
     if formulas and clues:
         return True
     if len(clinical_core_evidence_clues(evidence)) >= 2:
         return True
-    return any(
-        str(unit.get("unit_type", "")) in {"formula_pattern", "clinical_pattern"}
-        and clinical_evidence_clues(
-            " ".join(
-                [
-                    str(unit.get("subject", "")),
-                    str(unit.get("predicate", "")),
-                    str(unit.get("object", "")),
-                    str(unit.get("evidence_quote", "")),
-                ]
-            )
-        )
-        for unit in result.get("matched_knowledge_units", []) or []
-    )
+    return False
 
 
 def has_clinical_formula_evidence(result: dict[str, object]) -> bool:
-    evidence = result_evidence_text(result)
-    if extract_formula_terms(evidence):
-        return True
-    return any(
-        str(unit.get("unit_type", "")) == "formula_pattern"
-        or extract_formula_terms(str(unit.get("subject", "")))
-        or extract_formula_terms(str(unit.get("object", "")))
-        for unit in result.get("matched_knowledge_units", []) or []
-    )
+    return bool(known_formula_terms_in_evidence(primary_evidence_text(result)))
 
 
 def filter_results_for_query(query: str, results: list[dict[str, object]], intent: str) -> list[dict[str, object]]:
@@ -3544,11 +3573,12 @@ def filter_results_for_query(query: str, results: list[dict[str, object]], inten
         return results
 
     terms = query_specific_terms(query)
-    formulas = extract_formula_terms(query)
+    formulas = reliable_formula_anchors(query)
     filtered: list[dict[str, object]] = []
     for result in results:
-        evidence = result_evidence_text(result)
-        formula_match = bool(formulas and any(formula in evidence for formula in formulas))
+        evidence = primary_evidence_text(result)
+        evidence_formulas = set(known_formula_terms_in_evidence(evidence))
+        formula_match = bool(formulas and any(formula in evidence_formulas for formula in formulas))
         matched_terms = [term for term in terms if term in evidence]
         if (formula_match and clinical_evidence_clues(evidence)) or len(matched_terms) >= 2:
             filtered.append(result)
@@ -3562,7 +3592,7 @@ def run_query_plan_search(
     mode: str,
     intent: str,
 ) -> list[dict[str, object]]:
-    per_query_limit = max(limit * 2, 8)
+    per_query_limit = min(MAX_INTERNAL_SEARCH_LIMIT, max(limit * 2, 8))
     result_sets: list[list[dict[str, object]]] = []
     for planned_query in query_plan:
         results = store.search(planned_query, limit=per_query_limit, mode=mode)
@@ -3602,14 +3632,12 @@ def result_diversity_facets(result: dict[str, object], intent: str = "general") 
 
 
 def clinical_result_quality_bonus(result: dict[str, object]) -> float:
-    evidence = result_evidence_text(result)
-    formulas = extract_formula_terms(evidence)
+    evidence = primary_evidence_text(result)
+    formulas = known_formula_terms_in_evidence(evidence)
     core_clues = clinical_core_evidence_clues(evidence)
     bonus = 0.0
     if formulas:
         bonus += 0.18
-    if any(str(unit.get("unit_type", "")) == "formula_pattern" for unit in result.get("matched_knowledge_units", []) or []):
-        bonus += 0.35
     bonus += 0.12 * min(len(core_clues), 4)
     if {"下利", "热利"} <= set(core_clues) or {"下利", "寒利"} <= set(core_clues):
         bonus += 0.2
@@ -3856,8 +3884,11 @@ def filter_results_for_intent(
         for result in results:
             if not is_clinical_relevant_result(result):
                 continue
-            evidence = result_evidence_text(result)
-            formula_match = bool(query_formulas and any(formula in evidence for formula in query_formulas))
+            evidence = primary_evidence_text(result)
+            evidence_formulas = set(known_formula_terms_in_evidence(evidence))
+            formula_match = bool(
+                query_formulas and any(formula in evidence_formulas for formula in query_formulas)
+            )
             clue_match = bool(query_clues & set(canonical_clinical_clues(evidence)))
             if formula_match or clue_match:
                 clinical_filtered.append(result)
@@ -4062,13 +4093,8 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
 
 def collect_formula_names(results: list[dict[str, object]]) -> list[str]:
     names: list[str] = []
-    for unit in collect_matched_knowledge_units(results):
-        if unit.get("unit_type") == "formula_pattern":
-            names.append(str(unit.get("subject", "")))
-        names.extend(extract_formula_terms(str(unit.get("object", ""))))
-        names.extend(extract_formula_terms(str(unit.get("evidence_quote", ""))))
     for result in results:
-        names.extend(extract_formula_terms(str(result.get("text", ""))))
+        names.extend(known_formula_terms_in_evidence(primary_evidence_text(result)))
     return dedupe_keep_order(names)
 
 
@@ -4159,13 +4185,17 @@ def synthesize_pdf_rag_answer(
         )
         safety_notice = with_formula_dosage_safety("课程资料不能替代诊断；这里不直接给个人处方、剂量或治疗建议。")
     else:
-        knowledge_units = collect_matched_knowledge_units(relevant_results)[:5]
-        if knowledge_units:
+        points = "；".join(
+            evidence_quote(str(result.get("text", "")), max_chars=120)
+            for result in relevant_results[:3]
+            if str(result.get("text", "")).strip()
+        )
+        if not points:
             points = "；".join(
-                f"{unit.get('subject')}：{unit.get('object')}" for unit in knowledge_units
+                evidence_quote(text, max_chars=120)
+                for result in relevant_results[:3]
+                for text in source_primary_evidence_texts(result)[1:2]
             )
-        else:
-            points = "；".join(evidence_quote(str(result.get("text", "")), max_chars=80) for result in results[:3])
         citation_sentence = f"证据见 {citation_refs}。" if citation_refs else ""
         answer = f"根据当前检索结果，相关原文要点包括：{points}。{citation_sentence}"
         safety_notice = ""
@@ -4316,6 +4346,7 @@ def answer_pdf_rag(
     rerank_model: str | None = None,
     trace_enabled: bool = False,
 ) -> dict[str, object]:
+    validate_runtime_limit(limit, "limit", MAX_PUBLIC_ANSWER_LIMIT)
     if reranker not in {"auto", "none", "siliconflow"}:
         raise ValueError(f"unsupported reranker: {reranker}")
     if not isinstance(trace_enabled, bool):

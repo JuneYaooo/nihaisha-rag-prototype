@@ -32,6 +32,7 @@ from nihaisha_kg.pdf_vector import (
     extract_formula_terms,
     extract_knowledge_units_from_paragraph,
     filter_results_for_intent,
+    known_formula_terms_in_evidence,
     synthesize_pdf_rag_answer,
     knowledge_search_terms,
     text_search_terms,
@@ -927,6 +928,9 @@ class PdfVectorTests(unittest.TestCase):
             ["search", "q", "--mode", "text", "--limit", "-2", "--reranker", "auto"],
             ["evaluate", "--mode", "hybrid", "--limit", "0"],
             ["answer", "q", "--mode", "text", "--limit", "0"],
+            ["search", "q", "--mode", "text", "--limit", "101"],
+            ["evaluate", "--mode", "text", "--limit", str(10**50)],
+            ["answer", "q", "--mode", "text", "--limit", "101"],
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -952,6 +956,42 @@ class PdfVectorTests(unittest.TestCase):
             with self.subTest(helper_value=invalid):
                 with self.assertRaises((TypeError, ValueError)):
                     rag_cli._positive_limit(invalid)  # type: ignore[arg-type]
+        self.assertEqual(rag_cli._positive_limit(100), 100)
+
+    def test_answer_limit_is_bounded_before_store_or_backend_creation(self) -> None:
+        with (
+            patch("nihaisha_kg.pdf_vector.LocalVectorStore") as store,
+            patch("nihaisha_kg.pdf_vector.create_embedding_backend_for_db") as backend,
+        ):
+            with self.assertRaisesRegex(ValueError, "at most 100"):
+                answer_pdf_rag("query", Path("unused.sqlite"), limit=101)
+        store.assert_not_called()
+        backend.assert_not_called()
+
+    def test_vector_store_rejects_oversized_search_work_before_embedding_or_faiss(self) -> None:
+        class CountingBackend(DenseEmbeddingBackend):
+            name = "counting"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                self.calls += 1
+                return [[1.0, 0.0] for _ in texts]
+
+        backend = CountingBackend()
+        store = LocalVectorStore(Path("unused.sqlite"), embedding_backend=backend)
+        for call in (
+            lambda: store.search("q", limit=401),
+            lambda: store.search_vector("q", unit_limit=401),
+            lambda: store.search_text("q", candidate_limit=401),
+            lambda: store.search_knowledge_units("q", candidate_limit=401),
+            lambda: store.search_guide_nodes("q", limit=101),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ValueError, "at most (?:100|400)"):
+                    call()
+        self.assertEqual(backend.calls, 0)
 
     def test_cli_search_retrieves_and_reranks_once_then_limits_output(self) -> None:
         candidates = [
@@ -2000,6 +2040,119 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("桂枝汤", formulas)
         self.assertIn("甘草泻心汤", formulas)
         self.assertFalse(any(formula.startswith(("所以", "解表用", "就是")) for formula in formulas))
+
+    def test_known_formula_evidence_uses_longest_valid_occurrence(self) -> None:
+        text = "乌头桂枝汤用于寒疝；太阳中风，桂枝汤主之；另有桂枝汤锅产品。"
+
+        formulas = known_formula_terms_in_evidence(text)
+
+        self.assertEqual(formulas, ["乌头桂枝汤", "桂枝汤"])
+
+    def test_source_lookup_does_not_treat_embedded_short_formula_as_direct_evidence(self) -> None:
+        longer = {
+            "paragraph_id": "p-longer",
+            "source_path": "/tmp/金匮.pdf",
+            "title": "金匮 p1",
+            "page_start": 1,
+            "page_end": 1,
+            "text": "寒疝腹中痛，乌头桂枝汤主之。",
+            "matched_knowledge_units": [],
+        }
+        direct = {
+            "paragraph_id": "p-direct",
+            "source_path": "/tmp/伤寒.pdf",
+            "title": "伤寒 p2",
+            "page_start": 2,
+            "page_end": 2,
+            "text": "太阳中风，桂枝汤主之。",
+            "matched_knowledge_units": [],
+        }
+
+        answer = synthesize_pdf_rag_answer("桂枝汤出处", [longer, direct])
+
+        self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-direct"])
+        self.assertNotIn("乌头桂枝汤", answer["answer"])
+
+    def test_text_store_source_lookup_retains_only_direct_formula_evidence(self) -> None:
+        paragraphs = [
+            ParsedParagraph(
+                paragraph_id="p-longer", doc_id="doc", source_path="/tmp/金匮.pdf",
+                title="金匮 p1", page_start=1, page_end=1,
+                text="寒疝腹中痛，乌头桂枝汤主之。",
+            ),
+            ParsedParagraph(
+                paragraph_id="p-direct", doc_id="doc", source_path="/tmp/伤寒.pdf",
+                title="伤寒 p2", page_start=2, page_end=2,
+                text="太阳中风，桂枝汤主之。",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalVectorStore(Path(tmpdir) / "rag.sqlite")
+            store.recreate()
+            store.insert_paragraphs(paragraphs)
+            store.rebuild_text_index()
+            candidates = store.search("桂枝汤 出处", limit=8, mode="text")
+
+        answer = synthesize_pdf_rag_answer("桂枝汤出处", candidates)
+
+        self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-direct"])
+        self.assertNotIn("乌头桂枝汤", answer["answer"])
+
+    def test_clinical_answer_asserts_only_curated_formulas_from_primary_evidence(self) -> None:
+        result = {
+            "paragraph_id": "p-clinical",
+            "source_path": "/tmp/伤寒.pdf",
+            "title": "伤寒 p3",
+            "page_start": 3,
+            "page_end": 3,
+            "text": (
+                "有四逆很多汤，也可能出现麻黄汤，因为桂枝汤；夏汤只是残片。"
+                "病人恶寒咳嗽。太阳中风，桂枝汤主之。太阳伤寒，无汗而喘，麻黄汤主之。"
+            ),
+            "matched_knowledge_units": [
+                {
+                    "unit_type": "formula_pattern",
+                    "subject": "有四逆很多汤",
+                    "predicate": "主治",
+                    "object": "夏汤和伪造汤",
+                    "evidence_quote": "图谱错误字段，不是原文。",
+                }
+            ],
+        }
+
+        answer = synthesize_pdf_rag_answer("病人怕冷咳嗽，开什么方？", [result])
+
+        self.assertIn("桂枝汤", answer["answer"])
+        self.assertIn("麻黄汤", answer["answer"])
+        self.assertNotIn("有四逆很多汤", answer["answer"])
+        self.assertNotIn("夏汤", answer["answer"])
+        self.assertNotIn("伪造汤", answer["answer"])
+
+    def test_general_answer_uses_primary_paragraph_not_hostile_derived_unit(self) -> None:
+        result = {
+            "paragraph_id": "p-general",
+            "source_path": "/tmp/课程.pdf",
+            "title": "课程 p4",
+            "page_start": 4,
+            "page_end": 4,
+            "text": "课程原文说明太阳病可见恶寒，并提醒应结合原段落上下文理解。",
+            "matched_knowledge_units": [
+                {
+                    "unit_type": "clinical_pattern",
+                    "subject": "错误结论",
+                    "predicate": "等于",
+                    "object": "太阳病必然不恶寒",
+                    "evidence_quote": "派生导航字段可能有误",
+                }
+            ],
+        }
+
+        answer = synthesize_pdf_rag_answer("太阳病怎么理解", [result])
+
+        self.assertIn("太阳病可见恶寒", answer["answer"])
+        self.assertNotIn("错误结论", answer["answer"])
+        self.assertNotIn("必然不恶寒", answer["answer"])
+        self.assertEqual(answer["related_knowledge_units"][0]["subject"], "错误结论")
 
     def test_clinical_intent_filter_prefers_formula_evidence_over_symptom_only(self) -> None:
         symptom_only = {

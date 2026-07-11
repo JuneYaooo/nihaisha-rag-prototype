@@ -35,6 +35,7 @@ DEFAULT_DB = Path("data/pdf_rag_bge_m3/rag.sqlite")
 DEFAULT_EVAL_CASES = Path("evals/golden_v1.jsonl")
 TRACE_CHANNELS = frozenset({"vector", "text", "knowledge"})
 TRACE_MAX_IDS = 50
+MAX_PUBLIC_LIMIT = 100
 
 
 def _trace_text(value: object, max_chars: int = 500) -> str:
@@ -123,6 +124,8 @@ def _positive_limit(value: object) -> int:
         raise TypeError("limit must be a positive integer")
     if value <= 0:
         raise ValueError("limit must be a positive integer")
+    if value > MAX_PUBLIC_LIMIT:
+        raise ValueError(f"limit must be a positive integer at most {MAX_PUBLIC_LIMIT}")
     return value
 
 
