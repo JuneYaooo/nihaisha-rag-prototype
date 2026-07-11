@@ -61,6 +61,15 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 
 以下小数是从 `evals/baseline_v1.json` 中的原始浮点值四舍五入后展示，并非声明精确相等：Recall@5 ≈ **0.4761904762**，Recall@10 ≈ **0.5238095238**，MRR（`reciprocal_rank`）≈ **0.4047619048**，nDCG@10 ≈ **0.3908372076**，context precision@10 ≈ **0.3190476190**，forbidden hits@10 ≈ **0.0**。
 
+同一语料、同一 7 条种子、`limit=10` 的新鲜对比结果如下（均为四舍五入显示）：
+
+| 模式 | Recall@5 | Recall@10 | MRR | nDCG@10 | context precision@10 | forbidden hits@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| text | 0.5714285714 | 0.5714285714 | 0.4285714286 | 0.4659799296 | 0.4285714286 | 0.0 |
+| hybrid | 0.4761904762 | 0.5238095238 | 0.4047619048 | 0.3908372076 | 0.3190476190 | 0.0 |
+
+`hybrid` 一般仍适合用户表达与原文措辞不一致的语义召回，但它在这组很小的种子上**没有胜过 text**；这是当前已知质量缺口。模式选择必须按任务和评测实测，不能假定 hybrid 更好。精确术语、书名或原句查询应优先同时测 `text`。
+
 - Recall@k：前 k 条覆盖了多少标注相关段落。
 - MRR：第一个相关段落排名倒数的平均值，越高表示首次命中越靠前。
 - nDCG@10：考虑相关结果排序位置的折损收益。
@@ -68,6 +77,8 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 - forbidden hits@10：前 10 条命中明确禁止段落的平均次数，越低越好。
 
 这 7 条只是防止明显回归的种子，不是全面评测，更不能证明回答“全面”或“准确”。固定追问清单污染已移除，但小样本指标有限，检索仍可能带回无关证据；应检查 trace、PDF 页码和 citation 原文。其他限制包括 OCR 错误与课程来源覆盖不全、实体/关系规范化仍需改进，以及权威古籍原文和外部学术来源尚未入库。
+
+`baseline_v1.json` 顶层 `provenance` 固定记录生成命令、模式/limit、运行时代码提交、embedding、依赖版本及 golden/DB/FAISS/vector IDs 哈希，用于发现用例、代码或资产变化后的陈旧基线。`evaluate` 没有 reranker 阶段，因此 provenance 记为 `none`；查询 embedding 按 DB metadata 自动解析，最终解析到的 provider/model/dim 另行固定记录。原始 CLI 命令只重现 `cases`、`aggregate`、`results`；`provenance` 是审核后稳定附加的元数据，不由 CLI 输出。复现时应比较这三个原始字段，重新计算 golden/vector IDs SHA256，并通过 Git LFS pointer 核对 DB/FAISS OID；不能把旧 provenance 复制到新结果。`tests.test_evaluation` 会持续检查 provenance schema 以及可直接计算的哈希。
 
 ## 证据分层
 

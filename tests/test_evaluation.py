@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -295,6 +297,52 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(
             by_id["acupuncture-four-gates"].relevant_paragraph_ids,
             ("fb1cc40bb9bbb8be",),
+        )
+
+    def test_baseline_v1_has_stable_provenance_and_matching_case_count(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        baseline = json.loads((root / "evals" / "baseline_v1.json").read_text(encoding="utf-8"))
+        provenance = baseline["provenance"]
+
+        self.assertEqual(baseline["cases"], 7)
+        self.assertEqual(len(baseline["results"]), 7)
+        self.assertEqual(provenance["mode"], "hybrid")
+        self.assertEqual(provenance["limit"], 10)
+        self.assertEqual(provenance["code_commit"], "34d7e2a67a6cfaf9a8e2d880351c6b042826129d")
+        self.assertEqual(provenance["embedding"]["provider"], "SiliconFlow")
+        self.assertEqual(provenance["embedding"]["model"], "BAAI/bge-m3")
+        self.assertEqual(provenance["embedding"]["dimensions"], 1024)
+        self.assertEqual(provenance["embedding"]["selection"], "auto_from_db_metadata")
+        self.assertEqual(
+            provenance["artifacts"]["golden_sha256"],
+            "b415d6cfa1aafc951671a44277e5ff103bd46c05b98ac35fe804d34062a57479",
+        )
+        self.assertEqual(
+            provenance["artifacts"]["db_lfs_oid_sha256"],
+            "6b0ad8d1a1da4a03646190fd695f06d33fc722a2d9248dd76c101bc3fe8abe7e",
+        )
+        self.assertEqual(
+            provenance["artifacts"]["faiss_lfs_oid_sha256"],
+            "18d0bfd9ba247903d4ab75484443783e9c6cfe4ce7067948f74a5ea4b38cf412",
+        )
+        self.assertEqual(
+            provenance["artifacts"]["vector_ids_sha256"],
+            "89b86a26c54a04ee1682cabd806911d95d91136f262a09cbb31224fba8d30470",
+        )
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", provenance["artifacts"]["golden_sha256"]))
+        self.assertEqual(provenance["runtime"]["python"], "3.13.2")
+        self.assertEqual(provenance["runtime"]["faiss-cpu"], "1.14.3")
+        self.assertEqual(provenance["runtime"]["numpy"], "2.5.1")
+        self.assertEqual(provenance["runtime"]["requests"], "2.32.5")
+        self.assertEqual(
+            hashlib.sha256((root / "evals" / "golden_v1.jsonl").read_bytes()).hexdigest(),
+            provenance["artifacts"]["golden_sha256"],
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                (root / "data" / "pdf_rag_bge_m3" / "vector_ids.jsonl").read_bytes()
+            ).hexdigest(),
+            provenance["artifacts"]["vector_ids_sha256"],
         )
 
 

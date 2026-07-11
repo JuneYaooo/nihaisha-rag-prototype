@@ -110,6 +110,75 @@ class PdfVectorTests(unittest.TestCase):
     def setUp(self) -> None:
         pdf_vector.clear_faiss_caches()
 
+    def test_public_source_path_removes_absolute_posix_and_windows_roots(self) -> None:
+        self.assertEqual(
+            pdf_vector.public_source_path("/Users/alice/private/伤寒论.pdf"),
+            "pdfs/伤寒论.pdf",
+        )
+        self.assertEqual(
+            pdf_vector.public_source_path(r"C:\Users\alice\private\金匮.pdf"),
+            "pdfs/金匮.pdf",
+        )
+        self.assertEqual(
+            pdf_vector.public_source_path(r"C:Users\alice\private\温病.pdf"),
+            "pdfs/温病.pdf",
+        )
+        self.assertEqual(
+            pdf_vector.public_source_path("file:C:/Users/alice/private/本草.pdf"),
+            "pdfs/本草.pdf",
+        )
+        self.assertEqual(
+            pdf_vector.public_source_path("course/pdfs/针灸.pdf"),
+            "course/pdfs/针灸.pdf",
+        )
+        self.assertEqual(
+            pdf_vector.public_source_path(r"course\\pdfs\\针灸.pdf"),
+            "course/pdfs/针灸.pdf",
+        )
+
+    def test_public_search_modes_and_answer_hide_absolute_source_roots(self) -> None:
+        private_root = r"C:\Users\alice\private"
+        paragraph = ParsedParagraph(
+            paragraph_id="p-public",
+            doc_id="doc",
+            source_path=private_root + r"\伤寒论.pdf",
+            title="伤寒论 p42",
+            page_start=42,
+            page_end=42,
+            text="桂枝汤用于太阳中风，有汗恶风。",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "rag.sqlite"
+            store = LocalVectorStore(db_path)
+            store.recreate()
+            store.insert_paragraphs([paragraph])
+            store.insert_units(build_retrieval_units([paragraph]))
+            store.rebuild_text_index()
+            store.rebuild_knowledge_units()
+
+            mode_results = {
+                mode: store.search("桂枝汤 太阳中风", mode=mode, limit=3)
+                for mode in ("vector", "text", "knowledge")
+            }
+            answer = answer_pdf_rag(
+                "桂枝汤的出处在哪本书哪一页？",
+                db_path=db_path,
+                mode="text",
+                limit=3,
+                reranker="none",
+            )
+
+        for results in mode_results.values():
+            self.assertTrue(results)
+            self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in results))
+        serialized = json.dumps(answer, ensure_ascii=False)
+        self.assertNotIn(private_root, serialized)
+        self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in answer["results"]))
+        self.assertTrue(
+            all(citation["source_path"] == "pdfs/伤寒论.pdf" for citation in answer["citations"])
+        )
+        self.assertTrue(all(citation["label"] == "伤寒论.pdf p42" for citation in answer["citations"]))
+
     def _assert_unhealthy_faiss_mapping_reaches_dense_guard(
         self,
         mapped_unit_ids: list[str],
@@ -414,7 +483,7 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["node_type"], "formula")
         self.assertEqual(results[0]["badge"], "方证")
         self.assertEqual(results[0]["paragraph_id"], "p-guide")
-        self.assertEqual(results[0]["source_path"], "/tmp/伤寒.pdf")
+        self.assertEqual(results[0]["source_path"], "pdfs/伤寒.pdf")
         self.assertEqual(results[0]["page_start"], 169)
         self.assertIn("腹痛", results[0]["content"])
         self.assertIn("热利", results[0]["evidence_quote"])
@@ -1374,7 +1443,7 @@ class PdfVectorTests(unittest.TestCase):
         results = [
             {
                 "paragraph_id": "p-a",
-                "source_path": "/tmp/仲景心法.pdf",
+                "source_path": r"C:\Users\alice\private\仲景心法.pdf",
                 "title": "仲景心法 p20",
                 "page_start": 20,
                 "page_end": 20,
@@ -1386,6 +1455,7 @@ class PdfVectorTests(unittest.TestCase):
                         "predicate": "换算与剂量原则",
                         "object": "3.75克；5克",
                         "evidence_quote": "倪师在南宁讲一钱等于3.75克，人纪教程是一钱约等于5克。",
+                        "source_path": r"C:\Users\alice\private\仲景心法.pdf",
                     }
                 ],
             },
@@ -1416,6 +1486,7 @@ class PdfVectorTests(unittest.TestCase):
         self.assertIn("3.6克", answer["answer"])
         self.assertIn("[1]", answer["answer"])
         self.assertEqual(len(answer["citations"]), 2)
+        self.assertEqual(answer["citations"][0]["label"], "仲景心法.pdf p20")
         self.assertIn("3.6克", answer["citations"][1]["evidence_quote"])
         self.assertIn("不是个人用药剂量建议", answer["safety_notice"])
         self.assertIn("不同人的体质不同", answer["safety_notice"])
@@ -1424,7 +1495,7 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(len(answer["related_knowledge_units"]), 2)
         self.assertEqual(answer["related_knowledge_units"][0]["subject"], "一钱")
         self.assertIn("3.75克", answer["related_knowledge_units"][0]["object"])
-        self.assertEqual(answer["related_knowledge_units"][0]["source_path"], "/tmp/仲景心法.pdf")
+        self.assertEqual(answer["related_knowledge_units"][0]["source_path"], "pdfs/仲景心法.pdf")
         self.assertEqual(answer["related_knowledge_units"][0]["page_start"], 20)
         self.assertEqual(answer["related_knowledge_units"][0]["label"], "仲景心法.pdf p20")
 

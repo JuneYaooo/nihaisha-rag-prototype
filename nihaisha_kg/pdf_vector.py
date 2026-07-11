@@ -367,6 +367,25 @@ def clean_guide_evidence_text(text: str) -> str:
     return cleaned.strip()
 
 
+def public_source_path(source_path: object) -> str:
+    """Return a deterministic source path suitable for public JSON and citations."""
+    raw = str(source_path).strip()
+    if not raw:
+        return ""
+    slash_normalized = raw.replace("\\", "/")
+    normalized = re.sub(r"/{2,}", "/", slash_normalized)
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    basename = parts[-1] if parts else "source.pdf"
+    is_absolute = (
+        slash_normalized.startswith("/")
+        or bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", normalized))
+    )
+    is_unsafe_relative = any(part in {"..", "~"} or part.startswith("~") for part in parts)
+    if is_absolute or is_unsafe_relative:
+        return f"pdfs/{basename}"
+    return "/".join(parts)
+
+
 def is_guide_source_text(text: str) -> bool:
     normalized = normalize_whitespace(text)
     if len(normalized) < 12:
@@ -2118,7 +2137,7 @@ class LocalVectorStore:
                 "content": row["content"],
                 "search_text": row["search_text"],
                 "paragraph_id": row["paragraph_id"],
-                "source_path": row["source_path"],
+                "source_path": public_source_path(row["source_path"]),
                 "title": row["title"],
                 "page_start": row["page_start"],
                 "page_end": row["page_end"],
@@ -2576,7 +2595,7 @@ class LocalVectorStore:
                     {
                         "paragraph_id": paragraph["paragraph_id"],
                         "doc_id": paragraph["doc_id"],
-                        "source_path": paragraph["source_path"],
+                        "source_path": public_source_path(paragraph["source_path"]),
                         "title": paragraph["title"],
                         "page_start": paragraph["page_start"],
                         "page_end": paragraph["page_end"],
@@ -2681,7 +2700,7 @@ class LocalVectorStore:
                     {
                         "paragraph_id": paragraph["paragraph_id"],
                         "doc_id": paragraph["doc_id"],
-                        "source_path": paragraph["source_path"],
+                        "source_path": public_source_path(paragraph["source_path"]),
                         "title": paragraph["title"],
                         "page_start": paragraph["page_start"],
                         "page_end": paragraph["page_end"],
@@ -2837,7 +2856,7 @@ class LocalVectorStore:
                     {
                         "paragraph_id": paragraph["paragraph_id"],
                         "doc_id": paragraph["doc_id"],
-                        "source_path": paragraph["source_path"],
+                        "source_path": public_source_path(paragraph["source_path"]),
                         "title": paragraph["title"],
                         "page_start": paragraph["page_start"],
                         "page_end": paragraph["page_end"],
@@ -3702,7 +3721,8 @@ def build_citations(
         evidence = citation_evidence_for_result(result, intent=intent, query=query)
         if not evidence:
             continue
-        key = (str(result.get("source_path", "")), result.get("page_start"), evidence)
+        source_path = public_source_path(result.get("source_path", ""))
+        key = (source_path, result.get("page_start"), evidence)
         if key in seen:
             continue
         seen.add(key)
@@ -3710,11 +3730,11 @@ def build_citations(
             {
                 "index": len(citations) + 1,
                 "paragraph_id": result.get("paragraph_id", ""),
-                "source_path": result.get("source_path", ""),
+                "source_path": source_path,
                 "title": result.get("title", ""),
                 "page_start": result.get("page_start", ""),
                 "page_end": result.get("page_end", result.get("page_start", "")),
-                "label": citation_label(result),
+                "label": citation_label({**result, "source_path": source_path}),
                 "evidence_quote": evidence,
             }
         )
@@ -3811,10 +3831,12 @@ def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[di
                 continue
             seen.add(key)
             enriched = dict(unit)
-            source_path = str(result.get("source_path", ""))
+            source_path = public_source_path(result.get("source_path", ""))
             page_start = result.get("page_start")
             enriched.setdefault("paragraph_id", result.get("paragraph_id", ""))
-            enriched.setdefault("source_path", source_path)
+            enriched["source_path"] = public_source_path(
+                enriched.get("source_path") or source_path
+            )
             enriched.setdefault("title", result.get("title", ""))
             enriched.setdefault("page_start", page_start)
             enriched.setdefault("page_end", result.get("page_end", page_start))

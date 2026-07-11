@@ -1,5 +1,32 @@
 {
   "cases": 7,
+  "provenance": {
+    "schema_version": 1,
+    "generated_date": "2026-07-11",
+    "command": "python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10",
+    "mode": "hybrid",
+    "limit": 10,
+    "reranker": "none",
+    "code_commit": "34d7e2a67a6cfaf9a8e2d880351c6b042826129d",
+    "embedding": {
+      "provider": "SiliconFlow",
+      "model": "BAAI/bge-m3",
+      "dimensions": 1024,
+      "selection": "auto_from_db_metadata"
+    },
+    "artifacts": {
+      "golden_sha256": "b415d6cfa1aafc951671a44277e5ff103bd46c05b98ac35fe804d34062a57479",
+      "db_lfs_oid_sha256": "6b0ad8d1a1da4a03646190fd695f06d33fc722a2d9248dd76c101bc3fe8abe7e",
+      "faiss_lfs_oid_sha256": "18d0bfd9ba247903d4ab75484443783e9c6cfe4ce7067948f74a5ea4b38cf412",
+      "vector_ids_sha256": "89b86a26c54a04ee1682cabd806911d95d91136f262a09cbb31224fba8d30470"
+    },
+    "runtime": {
+      "python": "3.13.2",
+      "faiss-cpu": "1.14.3",
+      "numpy": "2.5.1",
+      "requests": "2.32.5"
+    }
+  },
   "aggregate": {
     "context_precision_at_1": 0.2857142857142857,
     "context_precision_at_10": 0.3190476190476191,
