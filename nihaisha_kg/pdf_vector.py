@@ -261,6 +261,12 @@ FORMULA_RIGHT_QUERY_SUFFIXES = (
 EXPLICIT_FORMULA_RIGHT_QUERY_SUFFIXES = (
     *FORMULA_RIGHT_QUERY_SUFFIXES, "是什么方", "开什么方", "如何理解", "怎么理解", "见于哪里",
 )
+EXPLICIT_FORMULA_NARRATIVE_PREFIXES = (
+    "可能出现", "因为", "可能", "提到", "患者", "病人", "关于", "查询", "请问", "喝", "吃", "有",
+)
+EXPLICIT_FORMULA_FOOD_TERMS = frozenset(
+    {"鸡", "排骨", "鱼", "菜", "饭", "粥", "酸辣", "火锅", "羊肉", "牛肉", "猪肉", "海鲜"}
+)
 MAX_RUNTIME_META_VALUE_CHARS = 4096
 MAX_PUBLIC_ANSWER_LIMIT = 100
 MAX_INTERNAL_SEARCH_LIMIT = 400
@@ -3169,8 +3175,36 @@ def _longest_known_formula_occurrences(text: str) -> list[tuple[int, int, str]]:
     return selected
 
 
+def is_conservative_explicit_formula_candidate(candidate: str) -> bool:
+    if not (FORMULA_MIN_CHARS <= len(candidate) <= FORMULA_MAX_CHARS):
+        return False
+    if candidate.startswith(EXPLICIT_FORMULA_NARRATIVE_PREFIXES):
+        return False
+    if any(term in candidate for term in EXPLICIT_FORMULA_FOOD_TERMS):
+        return False
+    suffix = next((item for item in FORMULA_SUFFIXES if candidate.endswith(item)), "")
+    if not suffix:
+        return False
+    stem = candidate[: -len(suffix)]
+    if stem.startswith(FORMULA_NUMERAL_PREFIXES):
+        return True
+    signal_chars = set(stem) & FORMULA_SIGNAL_CHARS
+    if "加" in stem:
+        left, right = stem.split("加", 1)
+        if (set(left) & FORMULA_SIGNAL_CHARS) and (set(right) & FORMULA_SIGNAL_CHARS):
+            return True
+    if len(signal_chars) >= 2:
+        return True
+    return stem.startswith("通脉") and any(character in stem for character in FORMULA_NUMERAL_PREFIXES)
+
+
 def explicit_query_formula_terms(query: str) -> list[str]:
-    candidates = extract_formula_terms(query)
+    candidates = [
+        candidate
+        for candidate in extract_formula_terms(query)
+        if candidate not in KNOWN_FORMULA_ANCHORS
+        and is_conservative_explicit_formula_candidate(candidate)
+    ]
     return bounded_query_terms(query, candidates, EXPLICIT_FORMULA_RIGHT_QUERY_SUFFIXES)[:8]
 
 
@@ -3858,6 +3892,16 @@ def citation_evidence_for_result(
 
     unit_quotes = verified_unit_evidence_quotes(result)
     paragraph = str(result.get("text", "")).strip()
+    if intent == "clinical":
+        explicit_terms = explicit_query_formula_terms(query)
+        if explicit_terms:
+            for quote in unit_quotes:
+                snippet = literal_term_evidence_snippet(quote, explicit_terms)
+                if snippet:
+                    return snippet
+            snippet = literal_term_evidence_snippet(paragraph, explicit_terms)
+            if snippet:
+                return snippet
     if intent == "source_lookup":
         anchors = reliable_source_anchors(query)
         if anchors:
@@ -3950,20 +3994,21 @@ def filter_results_for_intent(
         ]
     elif intent == "clinical":
         query_formulas = reliable_formula_anchors(query)
-        explicit_formulas = explicit_query_formula_terms(query)
+        explicit_focused = [
+            result for result in results if explicit_query_formulas_in_result(query, result)
+        ]
+        if explicit_focused:
+            return explicit_focused
         query_clues = set(canonical_clinical_clues(query))
         clinical_filtered: list[dict[str, object]] = []
         for result in results:
-            explicit_matches = explicit_query_formulas_in_result(query, result)
-            if not is_clinical_relevant_result(result) and not (
-                explicit_matches and clinical_evidence_clues(primary_evidence_text(result))
-            ):
+            if not is_clinical_relevant_result(result):
                 continue
             evidence = primary_evidence_text(result)
             evidence_formulas = set(known_formula_terms_in_evidence(evidence))
             formula_match = bool(
                 query_formulas and any(formula in evidence_formulas for formula in query_formulas)
-            ) or bool(set(explicit_formulas) & set(explicit_matches))
+            )
             clue_match = bool(query_clues & set(canonical_clinical_clues(evidence)))
             if formula_match or clue_match:
                 clinical_filtered.append(result)
@@ -4156,9 +4201,15 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
 
 
 def collect_formula_names(results: list[dict[str, object]], query: str = "") -> list[str]:
+    explicit_names = dedupe_keep_order(
+        formula
+        for result in results
+        for formula in explicit_query_formulas_in_result(query, result)
+    )
+    if explicit_names:
+        return explicit_names
     names: list[str] = []
     for result in results:
-        names.extend(explicit_query_formulas_in_result(query, result))
         names.extend(known_formula_terms_in_evidence(primary_evidence_text(result)))
     return dedupe_keep_order(names)
 

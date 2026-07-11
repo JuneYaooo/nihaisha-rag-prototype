@@ -2056,7 +2056,14 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(known_formula_terms_in_evidence("用桂枝汤。"), ["桂枝汤"])
 
     def test_explicit_query_formula_terms_are_product_safe_and_bounded(self) -> None:
-        self.assertEqual(explicit_query_formula_terms("白虎加人参汤出处"), ["白虎加人参汤"])
+        accepted = ("白虎加人参汤", "通脉四逆汤", "大陷胸汤", "小半夏汤")
+        rejected = ("喝人参鸡汤", "人参鸡汤", "排骨汤", "酸辣汤", "因为桂枝汤")
+        for formula in accepted:
+            with self.subTest(accepted=formula):
+                self.assertEqual(explicit_query_formula_terms(f"{formula}出处"), [formula])
+        for phrase in rejected:
+            with self.subTest(rejected=phrase):
+                self.assertEqual(explicit_query_formula_terms(f"{phrase}出处"), [])
         self.assertEqual(explicit_query_formula_terms("桂枝汤圆出处"), [])
         many = "、".join(f"测试{index}桂枝汤" for index in range(20)) + "出处"
         self.assertLessEqual(len(explicit_query_formula_terms(many)), 8)
@@ -2069,7 +2076,9 @@ class PdfVectorTests(unittest.TestCase):
             "page_start": 1,
             "page_end": 1,
             "text": "患者发热口渴，白虎加人参汤见于本段。",
-            "matched_knowledge_units": [],
+            "matched_knowledge_units": [
+                {"unit_type": "clinical_pattern", "evidence_quote": "患者发热口渴"}
+            ],
         }
         explicit = synthesize_pdf_rag_answer("患者发热口渴，白虎加人参汤如何理解？", [result])
         explicit_compound = synthesize_pdf_rag_answer(
@@ -2082,8 +2091,55 @@ class PdfVectorTests(unittest.TestCase):
         )
 
         self.assertIn("白虎加人参汤", explicit["answer"])
+        self.assertIn("白虎加人参汤", explicit["citations"][0]["evidence_quote"])
         self.assertIn("方名包括：通脉四逆汤。", explicit_compound["answer"])
         self.assertNotIn("四逆汤", generic["answer"])
+
+    def test_clinical_requested_compound_focuses_results_over_shorter_curated_formula(self) -> None:
+        compound = {
+            "paragraph_id": "p-compound",
+            "source_path": "/tmp/课程.pdf",
+            "title": "课程 p1",
+            "page_start": 1,
+            "page_end": 1,
+            "text": "患者发热口渴，白虎加人参汤见于本段。",
+            "matched_knowledge_units": [
+                {"unit_type": "clinical_pattern", "evidence_quote": "患者发热口渴"}
+            ],
+        }
+        shorter = {
+            **compound,
+            "paragraph_id": "p-shorter",
+            "page_start": 2,
+            "page_end": 2,
+            "text": "患者发热口渴，白虎汤主之。",
+        }
+
+        answer = synthesize_pdf_rag_answer(
+            "患者发热口渴，白虎加人参汤如何理解？",
+            [shorter, compound],
+        )
+
+        self.assertIn("方名包括：白虎加人参汤。", answer["answer"])
+        self.assertNotIn("白虎汤、", answer["answer"])
+        self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-compound"])
+        self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
+
+    def test_clinical_direct_curated_formula_still_works_without_explicit_unknown(self) -> None:
+        result = {
+            "paragraph_id": "p-direct-known",
+            "source_path": "/tmp/课程.pdf",
+            "title": "课程 p3",
+            "page_start": 3,
+            "page_end": 3,
+            "text": "患者恶寒无汗而喘，麻黄汤主之。",
+            "matched_knowledge_units": [],
+        }
+
+        answer = synthesize_pdf_rag_answer("患者恶寒无汗而喘，开什么方？", [result])
+
+        self.assertIn("麻黄汤", answer["answer"])
+        self.assertEqual(answer["citations"][0]["paragraph_id"], "p-direct-known")
 
     def test_source_lookup_does_not_treat_embedded_short_formula_as_direct_evidence(self) -> None:
         longer = {
