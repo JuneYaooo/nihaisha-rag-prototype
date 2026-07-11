@@ -2179,7 +2179,7 @@ class PdfVectorTests(unittest.TestCase):
             "title": "金匮 p1",
             "page_start": 1,
             "page_end": 1,
-            "text": "寒疝腹中痛，乌头桂枝汤主之。",
+            "text": "寒疝腹中痛，乌头桂枝汤主之。桂枝汤要另外煮过，再加入乌头蜜。",
             "matched_knowledge_units": [],
         }
         direct = {

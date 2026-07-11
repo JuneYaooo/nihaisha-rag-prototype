@@ -3263,6 +3263,15 @@ def source_anchor_matches_evidence(anchor: str, text: str) -> bool:
     return anchor in validated_source_anchor_spans(text, [anchor])
 
 
+def evidence_has_longer_formula_topic(text: str, formula_anchors: list[str]) -> bool:
+    evidence_formulas = known_formula_terms_in_evidence(text)
+    return any(
+        anchor != evidence_formula and anchor in evidence_formula
+        for anchor in formula_anchors
+        for evidence_formula in evidence_formulas
+    )
+
+
 def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
     validated = validated_source_anchor_spans(text, anchors)
     return all(anchor in validated for anchor in anchors)
@@ -3983,12 +3992,20 @@ def filter_results_for_intent(
         anchors = reliable_source_anchors(query)
         if not anchors:
             return results
+        formula_anchors = [anchor for anchor in anchors if anchor in KNOWN_FORMULA_ANCHORS]
         return [
             result
             for result in results
             if any(
                 evidence_contains_source_anchors(text, anchors)
                 for text in source_primary_evidence_texts(result)
+            )
+            and not (
+                formula_anchors
+                and evidence_has_longer_formula_topic(
+                    primary_evidence_text(result),
+                    formula_anchors,
+                )
             )
         ]
     elif intent == "clinical":
