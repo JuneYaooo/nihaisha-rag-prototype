@@ -407,7 +407,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(baseline["results"]), 7)
         self.assertEqual(provenance["mode"], "hybrid")
         self.assertEqual(provenance["limit"], 10)
-        self.assertEqual(provenance["code_commit"], "25b0b391bf17cf5ce9fe916fb4bb628b8ac50911")
+        self.assertEqual(provenance["code_commit"], "618a89ea66944ee39e147beccb8e238634743af6")
         self.assertEqual(provenance["embedding"]["provider"], "SiliconFlow")
         self.assertEqual(provenance["embedding"]["model"], "BAAI/bge-m3")
         self.assertEqual(provenance["embedding"]["dimensions"], 1024)
@@ -418,7 +418,7 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(
             provenance["artifacts"]["db_lfs_oid_sha256"],
-            "2e3e4cdb1dfdeb5c6cce29e9723a47633269dff49d4cd9ad26cda9ca7a1a9259",
+            "10a9b07786870b7377c52b3eeed4aca116cc533d8605dad18927fc0e95bc8042",
         )
         self.assertEqual(
             provenance["artifacts"]["faiss_lfs_oid_sha256"],

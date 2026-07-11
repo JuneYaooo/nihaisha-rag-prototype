@@ -7,7 +7,7 @@
     "mode": "hybrid",
     "limit": 10,
     "reranker": "none",
-    "code_commit": "25b0b391bf17cf5ce9fe916fb4bb628b8ac50911",
+    "code_commit": "618a89ea66944ee39e147beccb8e238634743af6",
     "embedding": {
       "provider": "SiliconFlow",
       "model": "BAAI/bge-m3",
@@ -16,7 +16,7 @@
     },
     "artifacts": {
       "golden_sha256": "b415d6cfa1aafc951671a44277e5ff103bd46c05b98ac35fe804d34062a57479",
-      "db_lfs_oid_sha256": "2e3e4cdb1dfdeb5c6cce29e9723a47633269dff49d4cd9ad26cda9ca7a1a9259",
+      "db_lfs_oid_sha256": "10a9b07786870b7377c52b3eeed4aca116cc533d8605dad18927fc0e95bc8042",
       "faiss_lfs_oid_sha256": "18d0bfd9ba247903d4ab75484443783e9c6cfe4ce7067948f74a5ea4b38cf412",
       "vector_ids_sha256": "89b86a26c54a04ee1682cabd806911d95d91136f262a09cbb31224fba8d30470"
     },
@@ -30,8 +30,8 @@
   },
   "aggregate": {
     "context_precision_at_1": 0.2857142857142857,
-    "context_precision_at_10": 0.3190476190476191,
-    "context_precision_at_5": 0.3095238095238095,
+    "context_precision_at_10": 0.34693877551020413,
+    "context_precision_at_5": 0.3333333333333333,
     "forbidden_hits_at_1": 0.0,
     "forbidden_hits_at_10": 0.0,
     "forbidden_hits_at_5": 0.0,
@@ -39,12 +39,12 @@
     "hit_at_10": 0.5714285714285714,
     "hit_at_5": 0.5714285714285714,
     "ndcg_at_1": 0.2857142857142857,
-    "ndcg_at_10": 0.3908372075752374,
-    "ndcg_at_5": 0.37145835422774487,
+    "ndcg_at_10": 0.41250921073903674,
+    "ndcg_at_5": 0.39016260473795306,
     "recall_at_1": 0.19047619047619047,
     "recall_at_10": 0.5238095238095238,
     "recall_at_5": 0.47619047619047616,
-    "reciprocal_rank": 0.4047619047619047
+    "reciprocal_rank": 0.42857142857142855
   },
   "results": [
     {
@@ -53,15 +53,15 @@
       "task_type": "dosage",
       "ranked_paragraph_ids": [
         "9e061d6932a26775",
+        "46ec95d3d262e38a",
         "755b52072e6909df",
         "2e3861c768ca3274",
         "93b436769d54b9b8",
         "1bfeafc1ad3bf4df",
-        "46ec95d3d262e38a",
+        "929e53c511a408c8",
+        "38a2a520cfe306e7",
         "85860614166e3253",
-        "ce66da546df3db33",
-        "96e40c76b0ff0fdb",
-        "929e53c511a408c8"
+        "1298ca6939814aae"
       ],
       "metrics": {
         "hit_at_1": 1.0,
@@ -77,8 +77,8 @@
         "hit_at_10": 1.0,
         "recall_at_10": 0.6666666666666666,
         "forbidden_hits_at_10": 0.0,
-        "context_precision_at_10": 0.39999999999999997,
-        "ndcg_at_10": 0.6049306994552042,
+        "context_precision_at_10": 0.42857142857142855,
+        "ndcg_at_10": 0.6257049680303419,
         "reciprocal_rank": 1.0
       }
     },
@@ -158,8 +158,8 @@
       "task_type": "entity_fact",
       "ranked_paragraph_ids": [
         "2628cc27ac7fbd80",
-        "17ab1a344456bfe8",
         "8d8dce6bfeae1f8b",
+        "17ab1a344456bfe8",
         "37d61b662ad3b6df",
         "d701ba5a856f3a36",
         "dcb5f29b7138c260",
@@ -177,14 +177,14 @@
         "hit_at_5": 1.0,
         "recall_at_5": 1.0,
         "forbidden_hits_at_5": 0.0,
-        "context_precision_at_5": 0.3333333333333333,
-        "ndcg_at_5": 0.5,
+        "context_precision_at_5": 0.5,
+        "ndcg_at_5": 0.6309297535714575,
         "hit_at_10": 1.0,
         "recall_at_10": 1.0,
         "forbidden_hits_at_10": 0.0,
-        "context_precision_at_10": 0.3333333333333333,
-        "ndcg_at_10": 0.5,
-        "reciprocal_rank": 0.3333333333333333
+        "context_precision_at_10": 0.5,
+        "ndcg_at_10": 0.6309297535714575,
+        "reciprocal_rank": 0.5
       }
     },
     {
@@ -262,16 +262,16 @@
       "query": "桂枝汤的出处在哪本书哪一页？",
       "task_type": "source_lookup",
       "ranked_paragraph_ids": [
+        "fae28d071ecdc995",
         "a57e811d8e2172b0",
+        "4952bef4acbb8b55",
+        "e49d5b1bb19b8056",
         "e801f69494a9b4fa",
         "46ed9a8897814a4c",
         "3032e07f0681947d",
         "411c97837029f871",
         "e7dd766eb99ec749",
-        "26182689bf17b309",
-        "fae28d071ecdc995",
-        "f587f66777214f98",
-        "13916dc13614741f"
+        "ef80cd1d6ebf2537"
       ],
       "metrics": {
         "hit_at_1": 0.0,

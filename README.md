@@ -28,17 +28,18 @@ export SILICONFLOW_API_KEY
 
 ```bash
 python3 -m nihaisha_kg doctor
+python3 -m nihaisha_kg search "麻黄汤对应什么方证？" --mode graph --limit 5
 python3 -m nihaisha_kg search "桂枝汤和麻黄汤的方证如何鉴别？" --mode hybrid --limit 8
 python3 -m nihaisha_kg answer "木香饼热熨法来自哪一本书哪一段？" --json --trace
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid
 ```
 
-`doctor` 应返回顶层 `"status": "ok"`。若只需精确词句或知识图谱，可不配置 key，改用 `--mode text` 或 `--mode knowledge`。
+`doctor` 应返回顶层 `"status": "ok"`。若只需精确词句或知识图谱，可不配置 key，改用 `--mode text`、`--mode knowledge` 或 `--mode graph`。
 
 ## 运行规则
 
 - 当前生产库包含 159,286 个 dense 检索单元。`vector` 和 `hybrid` 必须有 FAISS；不会静默退化成 SQLite 全量向量扫描。缺少模块或索引时先按 `doctor` 的诊断修复。
-- `text` 和 `knowledge` 不调用 embedding API，不需要 key。
+- `text`、`knowledge` 和 `graph` 不调用 embedding API，不需要 key。`graph` 只使用通过确定性结构检查的 `auto_accepted` 关系以及未来人工确认的 `reviewed` 关系，并始终回查原始段落。
 - `vector` 和 `hybrid` 同时需要查询 embedding 后端与 FAISS。推荐 SiliconFlow `BAAI/bge-m3`；离线可选本地后端：`python3 -m pip install -e ".[local]"`，并传 `--embedding local-bge-m3`。
 - CLI 的 `--reranker auto` 仅在存在 `SILICONFLOW_API_KEY` 时调用 SiliconFlow reranker；`--reranker none` 明确关闭。服务失败时会保留召回结果，并在 trace 中给出已脱敏的降级状态。
 - 普通文本输出保持兼容，但 `search` 和 `answer` 的纯文本输出都不显示 trace；必须同时传 `--json --trace`。搜索 trace 给出召回渠道/各渠道排名、最终选中段落 ID、reranker 模型/降级状态和搜索延迟；回答 trace 还给出分组的初始/追问计划、各计划观察结果的排名与渠道，以及各阶段延迟。
@@ -93,12 +94,13 @@ Runtime（生产库只读）
    ▼
 查询规范化 + 任务识别
    │
-   ├──────────────┬────────────────┐
-   ▼              ▼                ▼
-Text FTS       Vector          legacy knowledge_units
-trigram        BGE-M3+FAISS    规则知识导航
-   │              │                │
-   └──────────────┴───────┬────────┘
+   ├───────────┬──────────────┬────────────────┐
+   ▼           ▼              ▼                ▼
+Text FTS    Vector       legacy knowledge   accepted relations
+trigram     BGE-M3       knowledge_units    Graph 原文导航
+            + FAISS      规则知识导航        weight=0.35
+   │           │              │                │
+   └───────────┴──────────────┴───────┬────────┘
                           ▼
                        RRF 融合
                           │
@@ -116,8 +118,8 @@ trigram        BGE-M3+FAISS    规则知识导航
                    └── previous/next evidence ID：上下文
 
 
-规范知识结构（独立只读查询）
-================================
+规范知识结构（独立查询 + hybrid 低权重导航）
+=============================================
 
 documents
     │ 1:N
@@ -139,15 +141,16 @@ evidence_records ◄── 原始 paragraphs
 
 当前边界必须明确：
 
-- 默认 `hybrid` 仍使用 text、vector 和旧 `knowledge_units` 三路召回；新 `relations` **尚未直接加入 RRF 排名**。
-- `knowledge_relations(...)` 可以独立查询新实体和关系，返回对应原文、来源层、定位、置信度、抽取器版本及审核状态。
-- 当前 7,429 条迁移关系全部是 `needs_review`，只能辅助导航，不能自动写成答案事实。
+- 默认 `hybrid` 使用 text、vector、旧 `knowledge_units` 和新 graph 四路召回；graph 以 0.35 低权重加入 RRF，只负责把规范实体导航回原始段落。
+- `--mode graph` 和 `knowledge_relations(...)` 可以独立查询新实体关系；Graph CLI 无需 embedding 或 API Key。
+- 当前 7,429 条迁移关系中，6,888 条通过确定性结构检查成为 `auto_accepted`，541 条保持 `needs_review`。这里的自动接纳只表示抽取结构可靠，不表示专家确认医学事实。
+- Graph 召回只读取 `auto_accepted` 或未来人工确认的 `reviewed`；`needs_review`、`rejected` 和查询中无法识别为可靠实体的噪声不会进入 RRF。
 - 回答的最终证据权威始终是 PDF 原始段落；派生实体或关系不能脱离原文独立引用。
 - 因此当前状态是“证据型知识结构 + RAG”，不是已经人工审核完成的完整知识图谱，也不是全局 GraphRAG。
 
 ## 当前数据与质量基线
 
-`python3 -m nihaisha_kg stats` 当前实测为：11 份文档、5,375 个原文段落、159,286 个检索单元、10,436 个知识图谱单元、19,072 个 guide nodes；dense 向量为 1024 维，FAISS 映射同为 159,286 条。
+`python3 -m nihaisha_kg stats` 当前实测为：11 份文档、5,375 个原文段落、159,286 个检索单元、10,436 个旧知识单元、19,072 个 guide nodes；规范结构另有 750 个实体、4,859 条别名记录和 7,429 条关系。dense 向量为 1024 维，FAISS 映射同为 159,286 条。
 
 仓库提交了 7 条回归种子用例 `evals/golden_v1.jsonl` 和一次实测结果 `evals/baseline_v1.json`。复现命令：
 
@@ -155,14 +158,14 @@ evidence_records ◄── 原始 paragraphs
 python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --limit 10
 ```
 
-以下小数是从 `evals/baseline_v1.json` 中的原始浮点值四舍五入后展示，并非声明精确相等：Recall@5 ≈ **0.4761904762**，Recall@10 ≈ **0.5238095238**，MRR（`reciprocal_rank`）≈ **0.4047619048**，nDCG@10 ≈ **0.3908372076**，context precision@10 ≈ **0.3190476190**，forbidden hits@10 ≈ **0.0**。
+以下小数是从 `evals/baseline_v1.json` 中的原始浮点值四舍五入后展示，并非声明精确相等：Recall@5 ≈ **0.4761904762**，Recall@10 ≈ **0.5238095238**，MRR（`reciprocal_rank`）≈ **0.4285714286**，nDCG@10 ≈ **0.4125092107**，context precision@10 ≈ **0.3469387755**，forbidden hits@10 ≈ **0.0**。
 
 同一语料、同一 7 条种子、`limit=10` 的新鲜对比结果如下（均为四舍五入显示）：
 
 | 模式 | Recall@5 | Recall@10 | MRR | nDCG@10 | context precision@10 | forbidden hits@10 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | text | 0.5714285714 | 0.5714285714 | 0.4285714286 | 0.4659799296 | 0.4285714286 | 0.0 |
-| hybrid | 0.4761904762 | 0.5238095238 | 0.4047619048 | 0.3908372076 | 0.3190476190 | 0.0 |
+| hybrid（含 graph） | 0.4761904762 | 0.5238095238 | 0.4285714286 | 0.4125092107 | 0.3469387755 | 0.0 |
 
 `hybrid` 一般仍适合用户表达与原文措辞不一致的语义召回，但它在这组很小的种子上**没有胜过 text**；这是当前已知质量缺口。模式选择必须按任务和评测实测，不能假定 hybrid 更好。精确术语、书名或原句查询应优先同时测 `text`。
 
@@ -185,9 +188,9 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 | `course_primary` | 已有结构化文档层 | 10 份课程讲义、同步文稿和教程；答案仍以 PDF 原文段落为主证据 |
 | `classic_primary` | 已有 1 份候选文档层 | 当前登记《黄帝内经原文和翻译》；尚未完成版本校勘与专家审核 |
 | `reference_secondary` | 未来入库，权威级别较低 | 学术研究、参考书和网页材料，只作补充 |
-| `derived` | 已有候选实体和关系 | 仅用于导航；所有迁移关系当前均为 `needs_review`，不能独立作为事实依据 |
+| `derived` | 已有候选实体和关系 | 仅用于导航；`auto_accepted` 表示通过结构检查，不等于专家确认，不能独立作为事实依据 |
 
-当前 SQLite 已增加 `documents`、`evidence_records`、`entities`、`entity_aliases` 和 `relations`。5,375 个原始段落均有证据记录和前后文链接；候选关系必须回到原始段落。迁移数据仍来自规则抽取，全部标记为 `needs_review`，所以结构化不等于已经完整、正确或专家审核。答案权威继续来自检索到的 PDF 原文段落，而不是候选关系字段。
+当前 SQLite 已增加 `documents`、`evidence_records`、`entities`、`entity_aliases` 和 `relations`。5,375 个原始段落均有证据记录和前后文链接；候选关系必须回到原始段落。迁移数据仍来自规则抽取，6,888 条通过确定性结构检查标记为 `auto_accepted`，541 条保留为 `needs_review`；结构化和自动接纳都不等于已经完整、正确或专家审核。答案权威继续来自检索到的 PDF 原文段落，而不是候选关系字段。
 
 JSON citation 同时返回简短 `evidence_quote` 和完整 `paragraph_text`；有上下文 ID 时还返回 `previous_evidence_id`、`next_evidence_id`，供调用方展开相邻段落。`knowledge_relations(db_path, entity_name)` 可只读查询实体关系，并返回来源层、原文、定位、置信度、抽取器版本和审核状态。
 

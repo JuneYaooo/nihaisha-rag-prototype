@@ -35,7 +35,7 @@ Scratch/traces 可能包含课程正文或内部路径，必须留在受控环�
 
 ## 知识结构迁移
 
-可移植资产完成后，在 builder 中运行 `scripts/migrate_knowledge_structure.py` 生成独立 staging。迁移器建立文档层、逐段证据、规范实体、别名和类型化关系，并生成 `knowledge_structure_report.json`。旧知识单元只有在证据摘录逐字存在于原始段落且主体满足基本结构要求时才进入候选关系；所有迁移关系均为 `needs_review`，不得宣称已经专家审核。
+可移植资产完成后，在 builder 中运行 `scripts/migrate_knowledge_structure.py` 生成独立 staging。迁移器建立文档层、逐段证据、规范实体、别名和类型化关系，并生成 `knowledge_structure_report.json`。旧知识单元只有在证据摘录逐字存在于原始段落且主体满足基本结构要求时才进入候选关系；具有直接方剂结构信号的关系，以及原文逐字出现的症状/剂量关系可标记为 `auto_accepted`，其余保持 `needs_review`。自动接纳只表示抽取结构检查通过，不得宣称已经专家审核。
 
 质量报告至少核对文档、证据、实体、别名、关系、拒绝候选、孤立实体、关系证据覆盖率、谓词分布和审核状态。Runtime 只读这些结构，不在生产 SQLite 中补写或提升审核状态。
 
