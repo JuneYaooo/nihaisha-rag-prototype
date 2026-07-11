@@ -30,6 +30,7 @@ from nihaisha_kg.pdf_vector import (
     build_query_plan,
     answer_anchor_terms,
     extract_formula_terms,
+    explicit_query_formula_terms,
     extract_knowledge_units_from_paragraph,
     filter_results_for_intent,
     known_formula_terms_in_evidence,
@@ -2047,6 +2048,42 @@ class PdfVectorTests(unittest.TestCase):
         formulas = known_formula_terms_in_evidence(text)
 
         self.assertEqual(formulas, ["乌头桂枝汤", "桂枝汤"])
+
+    def test_known_formula_evidence_suppresses_short_anchor_inside_unknown_compound(self) -> None:
+        self.assertEqual(known_formula_terms_in_evidence("通脉四逆汤主之。"), [])
+        self.assertEqual(known_formula_terms_in_evidence("太阳中风桂枝汤。"), [])
+        self.assertEqual(known_formula_terms_in_evidence("桂枝汤主之。"), ["桂枝汤"])
+        self.assertEqual(known_formula_terms_in_evidence("用桂枝汤。"), ["桂枝汤"])
+
+    def test_explicit_query_formula_terms_are_product_safe_and_bounded(self) -> None:
+        self.assertEqual(explicit_query_formula_terms("白虎加人参汤出处"), ["白虎加人参汤"])
+        self.assertEqual(explicit_query_formula_terms("桂枝汤圆出处"), [])
+        many = "、".join(f"测试{index}桂枝汤" for index in range(20)) + "出处"
+        self.assertLessEqual(len(explicit_query_formula_terms(many)), 8)
+
+    def test_clinical_formula_output_allows_only_matching_request_scoped_compound(self) -> None:
+        result = {
+            "paragraph_id": "p-explicit",
+            "source_path": "/tmp/课程.pdf",
+            "title": "课程 p1",
+            "page_start": 1,
+            "page_end": 1,
+            "text": "患者发热口渴，白虎加人参汤见于本段。",
+            "matched_knowledge_units": [],
+        }
+        explicit = synthesize_pdf_rag_answer("患者发热口渴，白虎加人参汤如何理解？", [result])
+        explicit_compound = synthesize_pdf_rag_answer(
+            "患者下利恶心，通脉四逆汤如何理解？",
+            [{**result, "text": "患者下利恶心，通脉四逆汤见于本段。"}],
+        )
+        generic = synthesize_pdf_rag_answer(
+            "患者咳嗽怕冷，开什么方？",
+            [{**result, "text": "患者咳嗽怕冷，通脉四逆汤见于旁文。"}],
+        )
+
+        self.assertIn("白虎加人参汤", explicit["answer"])
+        self.assertIn("方名包括：通脉四逆汤。", explicit_compound["answer"])
+        self.assertNotIn("四逆汤", generic["answer"])
 
     def test_source_lookup_does_not_treat_embedded_short_formula_as_direct_evidence(self) -> None:
         longer = {

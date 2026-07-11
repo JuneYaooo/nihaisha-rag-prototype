@@ -258,6 +258,9 @@ FORMULA_RIGHT_QUERY_SUFFIXES = (
     "的出处", "出处", "原文", "哪本书", "哪一页", "方证", "主治", "对应",
     "如何", "鉴别", "比较", "区别", "和", "与", "、",
 )
+EXPLICIT_FORMULA_RIGHT_QUERY_SUFFIXES = (
+    *FORMULA_RIGHT_QUERY_SUFFIXES, "是什么方", "开什么方", "如何理解", "怎么理解", "见于哪里",
+)
 MAX_RUNTIME_META_VALUE_CHARS = 4096
 MAX_PUBLIC_ANSWER_LIMIT = 100
 MAX_INTERNAL_SEARCH_LIMIT = 400
@@ -3144,15 +3147,52 @@ def _longest_known_formula_occurrences(text: str) -> list[tuple[int, int, str]]:
                 occurrences.append((offset, end, formula))
             offset = normalized.find(formula, offset + 1)
     selected: list[tuple[int, int, str]] = []
+    formula_like_occurrences: list[tuple[int, int, str]] = []
+    for candidate in extract_formula_terms(normalized):
+        offset = normalized.find(candidate)
+        while offset >= 0:
+            formula_like_occurrences.append((offset, offset + len(candidate), candidate))
+            offset = normalized.find(candidate, offset + 1)
     for occurrence in sorted(occurrences, key=lambda item: (item[0], -len(item[2]), item[2])):
         start, end, _ = occurrence
-        if any(
+        embedded_in_known = any(
             kept_start <= start and end <= kept_end and (kept_end - kept_start) > (end - start)
             for kept_start, kept_end, _ in occurrences
-        ):
+        )
+        embedded_in_formula_like = any(
+            kept_start <= start and end <= kept_end and (kept_end - kept_start) > (end - start)
+            for kept_start, kept_end, _ in formula_like_occurrences
+        )
+        if embedded_in_known or embedded_in_formula_like:
             continue
         selected.append(occurrence)
     return selected
+
+
+def explicit_query_formula_terms(query: str) -> list[str]:
+    candidates = extract_formula_terms(query)
+    return bounded_query_terms(query, candidates, EXPLICIT_FORMULA_RIGHT_QUERY_SUFFIXES)[:8]
+
+
+def literal_product_safe_term_in_text(term: str, text: str) -> bool:
+    offset = text.find(term)
+    while term and offset >= 0:
+        right = text[offset + len(term) :]
+        if not any(right.startswith(continuation) for continuation in FORMULA_PRODUCT_CONTINUATIONS):
+            return True
+        offset = text.find(term, offset + 1)
+    return False
+
+
+def explicit_query_formulas_in_result(query: str, result: dict[str, object]) -> list[str]:
+    paragraph = str(result.get("text", "")).strip()
+    if not paragraph:
+        return []
+    return [
+        term
+        for term in explicit_query_formula_terms(query)
+        if literal_product_safe_term_in_text(term, paragraph)
+    ]
 
 
 def validated_source_anchor_spans(
@@ -3195,15 +3235,14 @@ def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
 
 def verified_unit_evidence_quotes(result: dict[str, object]) -> list[str]:
     paragraph = str(result.get("text", "")).strip()
-    normalized_paragraph = normalize_whitespace(normalize_query_text(paragraph))
-    if not normalized_paragraph:
+    if not paragraph:
         return []
     quotes: list[str] = []
     for unit in result.get("matched_knowledge_units", []) or []:
         quote = str(unit.get("evidence_quote", "")).strip()
-        normalized_quote = normalize_whitespace(normalize_query_text(quote))
-        if normalized_quote and normalized_quote in normalized_paragraph:
-            quotes.append(quote)
+        offset = paragraph.find(quote) if quote else -1
+        if offset >= 0:
+            quotes.append(paragraph[offset : offset + len(quote)])
     return dedupe_keep_order(quotes)
 
 
@@ -3782,6 +3821,24 @@ def anchor_evidence_snippet(text: str, anchors: list[str], max_chars: int = 220)
     return separator.join(snippets)
 
 
+def literal_term_evidence_snippet(text: str, terms: list[str], max_chars: int = 220) -> str:
+    present = [term for term in terms if literal_product_safe_term_in_text(term, text)]
+    if not present:
+        return ""
+    for match in SENTENCE_RE.finditer(text):
+        sentence = match.group(0).strip()
+        if any(literal_product_safe_term_in_text(term, sentence) for term in present):
+            if len(sentence) <= max_chars:
+                return sentence
+    term = present[0]
+    offset = text.find(term)
+    context = max_chars - len(term)
+    start = max(0, offset - context // 2)
+    end = min(len(text), start + max_chars)
+    start = max(0, end - max_chars)
+    return text[start:end].strip()
+
+
 def citation_evidence_for_result(
     result: dict[str, object],
     intent: str = "general",
@@ -3809,6 +3866,15 @@ def citation_evidence_for_result(
                     return anchor_evidence_snippet(quote, anchors)
             if paragraph and evidence_contains_source_anchors(paragraph, anchors):
                 return anchor_evidence_snippet(paragraph, anchors)
+        explicit_terms = explicit_query_formula_terms(query) if not anchors else []
+        if explicit_terms:
+            for quote in unit_quotes:
+                snippet = literal_term_evidence_snippet(quote, explicit_terms)
+                if snippet:
+                    return snippet
+            snippet = literal_term_evidence_snippet(paragraph, explicit_terms)
+            if snippet:
+                return snippet
     if unit_quotes:
         return unit_quotes[0]
     return evidence_quote(paragraph, max_chars=220).strip()
@@ -3884,16 +3950,20 @@ def filter_results_for_intent(
         ]
     elif intent == "clinical":
         query_formulas = reliable_formula_anchors(query)
+        explicit_formulas = explicit_query_formula_terms(query)
         query_clues = set(canonical_clinical_clues(query))
         clinical_filtered: list[dict[str, object]] = []
         for result in results:
-            if not is_clinical_relevant_result(result):
+            explicit_matches = explicit_query_formulas_in_result(query, result)
+            if not is_clinical_relevant_result(result) and not (
+                explicit_matches and clinical_evidence_clues(primary_evidence_text(result))
+            ):
                 continue
             evidence = primary_evidence_text(result)
             evidence_formulas = set(known_formula_terms_in_evidence(evidence))
             formula_match = bool(
                 query_formulas and any(formula in evidence_formulas for formula in query_formulas)
-            )
+            ) or bool(set(explicit_formulas) & set(explicit_matches))
             clue_match = bool(query_clues & set(canonical_clinical_clues(evidence)))
             if formula_match or clue_match:
                 clinical_filtered.append(result)
@@ -4085,9 +4155,10 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
     return dedupe_keep_order(values)
 
 
-def collect_formula_names(results: list[dict[str, object]]) -> list[str]:
+def collect_formula_names(results: list[dict[str, object]], query: str = "") -> list[str]:
     names: list[str] = []
     for result in results:
+        names.extend(explicit_query_formulas_in_result(query, result))
         names.extend(known_formula_terms_in_evidence(primary_evidence_text(result)))
     return dedupe_keep_order(names)
 
@@ -4108,6 +4179,18 @@ def synthesize_pdf_rag_answer(
 ) -> dict[str, object]:
     intent = detect_answer_intent(query)
     relevant_results = filter_results_for_intent(query, intent, results)
+    if intent == "source_lookup" and not reliable_source_anchors(query):
+        explicit_terms = explicit_query_formula_terms(query)
+        if explicit_terms:
+            relevant_results = sorted(
+                relevant_results,
+                key=lambda result: not any(
+                    literal_product_safe_term_in_text(
+                        term, str(result.get("text", "")).strip()
+                    )
+                    for term in explicit_terms
+                ),
+            )
     citations = build_citations(
         relevant_results,
         max_citations=max_citations,
@@ -4167,7 +4250,7 @@ def synthesize_pdf_rag_answer(
             else ""
         )
     elif intent == "clinical":
-        formulas = collect_formula_names(relevant_results)[:8]
+        formulas = collect_formula_names(relevant_results, query=query)[:8]
         formula_text = "、".join(formulas) if formulas else "未稳定抽取到方名"
         focus_clues = clinical_evidence_clues(normalize_query_text(query))
         focus_text = "、".join(focus_clues) if focus_clues else "问题中描述的症状"

@@ -9,12 +9,15 @@ from typing import Iterable, Mapping
 
 
 SUPPORTED_EVALUATION_MODES = frozenset({"hybrid", "vector", "text", "knowledge"})
-MAX_EVALUATION_CASES = 10_000
+MAX_EVALUATION_CASES = 1_000
 MAX_EVALUATION_PARAGRAPH_ID_CHARS = 256
 MAX_EVALUATION_JSONL_LINE_BYTES = 1_048_576
+MAX_EVALUATION_FILE_BYTES = 16 * 1024 * 1024
 MAX_EVALUATION_QUERY_CHARS = 2_000
 MAX_EVALUATION_SCALAR_ID_CHARS = 256
 MAX_EVALUATION_ID_LIST_ITEMS = 1_000
+MAX_EVALUATION_TOTAL_ID_ITEMS = 20_000
+MAX_EVALUATION_TOTAL_ID_CHARS = 2_000_000
 MAX_PUBLIC_LIMIT = 100
 
 
@@ -31,15 +34,24 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
     required_fields = ("case_id", "query", "task_type", "relevant_paragraph_ids")
     cases: list[EvalCase] = []
     seen_case_ids: set[str] = set()
+    total_id_items = 0
+    total_id_chars = 0
+
+    if path.stat().st_size > MAX_EVALUATION_FILE_BYTES:
+        raise ValueError(f"{path}:1: evaluation file exceeds maximum byte length")
 
     with path.open("rb") as handle:
         line_number = 0
+        total_bytes_read = 0
         while True:
             raw_line = handle.readline(MAX_EVALUATION_JSONL_LINE_BYTES + 1)
             if not raw_line:
                 break
             line_number += 1
             location = f"{path}:{line_number}:"
+            total_bytes_read += len(raw_line)
+            if total_bytes_read > MAX_EVALUATION_FILE_BYTES:
+                raise ValueError(f"{location} evaluation file exceeds maximum byte length")
             if len(raw_line) > MAX_EVALUATION_JSONL_LINE_BYTES:
                 raise ValueError(f"{location} line exceeds maximum byte length")
             try:
@@ -50,11 +62,10 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
                 continue
             try:
                 row = json.loads(line)
-            except (json.JSONDecodeError, RecursionError) as exc:
-                if isinstance(exc, json.JSONDecodeError):
-                    message = exc.msg
-                else:
-                    message = "JSON nesting is too deep"
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{location} invalid JSON: {exc.msg}") from exc
+            except (RecursionError, UnicodeError, ValueError) as exc:
+                message = "JSON value cannot be safely decoded"
                 raise ValueError(f"{location} invalid JSON: {message}") from exc
             if not isinstance(row, dict):
                 raise ValueError(f"{location} evaluation row must be a JSON object")
@@ -67,6 +78,8 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
                 value = row[field]
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f"{location} {field} must be a non-empty string")
+                if any("\ud800" <= character <= "\udfff" for character in value):
+                    raise ValueError(f"{location} {field} contains an invalid Unicode surrogate")
             if len(row["query"]) > MAX_EVALUATION_QUERY_CHARS:
                 raise ValueError(f"{location} query exceeds maximum length")
             for field in ("case_id", "task_type"):
@@ -85,6 +98,11 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
                     raise ValueError(f"{location} {field} exceeds maximum item count")
                 if any(not isinstance(value, str) or not value.strip() for value in values):
                     raise ValueError(f"{location} {field} must contain non-empty strings")
+                if any(
+                    any("\ud800" <= character <= "\udfff" for character in value)
+                    for value in values
+                ):
+                    raise ValueError(f"{location} {field} contains an invalid Unicode surrogate")
                 if any(len(value) > MAX_EVALUATION_PARAGRAPH_ID_CHARS for value in values):
                     raise ValueError(f"{location} {field} contains an ID exceeding maximum length")
                 if len(values) != len(set(values)):
@@ -95,9 +113,19 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
             if set(relevant_ids) & set(forbidden_ids):
                 raise ValueError(f"{location} relevant and forbidden paragraph IDs must not overlap")
 
+            row_ids = [*relevant_ids, *forbidden_ids]
+            total_id_items += len(row_ids)
+            total_id_chars += sum(len(value) for value in row_ids)
+            if total_id_items > MAX_EVALUATION_TOTAL_ID_ITEMS:
+                raise ValueError(f"{location} cumulative ID item budget exceeded")
+            if total_id_chars > MAX_EVALUATION_TOTAL_ID_CHARS:
+                raise ValueError(f"{location} cumulative ID character budget exceeded")
+
             case_id = row["case_id"]
             if case_id in seen_case_ids:
                 raise ValueError(f"{location} duplicate case_id")
+            if len(cases) >= MAX_EVALUATION_CASES:
+                raise ValueError(f"{location} evaluation cases exceed maximum of {MAX_EVALUATION_CASES}")
             seen_case_ids.add(case_id)
             cases.append(
                 EvalCase(
@@ -108,8 +136,6 @@ def load_eval_cases(path: Path) -> list[EvalCase]:
                     forbidden_paragraph_ids=tuple(forbidden_ids),
                 )
             )
-            if len(cases) > MAX_EVALUATION_CASES:
-                raise ValueError(f"{location} evaluation cases exceed maximum of {MAX_EVALUATION_CASES}")
 
     if not cases:
         raise ValueError(f"{path}:1: evaluation file is empty")

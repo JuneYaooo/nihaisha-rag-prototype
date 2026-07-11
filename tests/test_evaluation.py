@@ -6,6 +6,7 @@ import math
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from nihaisha_kg.evaluation import (
@@ -18,6 +19,7 @@ from nihaisha_kg.evaluation import (
     MAX_EVALUATION_QUERY_CHARS,
     MAX_EVALUATION_ID_LIST_ITEMS,
 )
+from nihaisha_kg import evaluation
 
 
 class EvaluationTests(unittest.TestCase):
@@ -170,6 +172,44 @@ class EvaluationTests(unittest.TestCase):
         for label, record in invalid_records.items():
             with self.subTest(label=label):
                 self.assert_invalid_eval_jsonl(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def test_load_eval_cases_enforces_aggregate_file_id_item_and_character_budgets(self) -> None:
+        rows = [
+            {
+                "case_id": f"case-{index}",
+                "query": "query",
+                "task_type": "source",
+                "relevant_paragraph_ids": [f"paragraph-{index}"],
+            }
+            for index in range(4)
+        ]
+        content = "".join(json.dumps(row) + "\n" for row in rows)
+        cases = (
+            ("MAX_EVALUATION_FILE_BYTES", len(content.encode("utf-8")) - 1, "file exceeds"),
+            ("MAX_EVALUATION_TOTAL_ID_ITEMS", 3, "cumulative ID item"),
+            ("MAX_EVALUATION_TOTAL_ID_CHARS", 20, "cumulative ID character"),
+        )
+        for constant, budget, message in cases:
+            with self.subTest(constant=constant):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir) / "eval.jsonl"
+                    path.write_text(content, encoding="utf-8")
+                    with patch.object(evaluation, constant, budget):
+                        with self.assertRaisesRegex(ValueError, message) as caught:
+                            load_eval_cases(path)
+                    self.assertIn(str(path), str(caught.exception))
+
+    def test_load_eval_cases_localizes_surrogates_and_huge_integer_errors(self) -> None:
+        valid = {
+            "case_id": "case-1",
+            "query": "query",
+            "task_type": "source",
+            "relevant_paragraph_ids": ["p1"],
+        }
+        surrogate = json.dumps({**valid, "query": "bad\ud800value"}) + "\n"
+        huge_integer = json.dumps(valid)[:-1] + ', "ignored": ' + "9" * 5000 + "}\n"
+        self.assert_invalid_eval_jsonl(surrogate)
+        self.assert_invalid_eval_jsonl(huge_integer)
 
     def test_evaluate_ranked_ids_deduplicates_at_first_occurrence(self) -> None:
         case = EvalCase(

@@ -301,7 +301,7 @@ class AnswerQualityTests(unittest.TestCase):
 
     def test_source_citation_budget_retains_all_distant_query_anchors(self) -> None:
         formulas = ("桂枝汤", "麻黄汤", "四逆汤", "真武汤", "葛根汤", "小柴胡汤")
-        paragraph = ("背景说明" * 40).join(formulas)
+        paragraph = ("。" + "背景说明" * 40 + "。").join(formulas)
         query = "、".join(formulas) + "出处"
 
         answer = pdf_vector.synthesize_pdf_rag_answer(query, [result(paragraph)])
@@ -498,6 +498,32 @@ class AnswerQualityTests(unittest.TestCase):
 
         self.assertEqual(answer["citations"][0]["evidence_quote"], "太阳中风，桂枝汤主之。")
 
+    def test_cross_script_derived_quote_is_not_emitted_as_literal_original(self) -> None:
+        evidence = result("太陽中風，桂枝湯主之。")
+        evidence["matched_knowledge_units"] = [
+            {"evidence_quote": "太阳中风，桂枝汤主之。"}
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
+
+        self.assertIn("桂枝湯", answer["citations"][0]["evidence_quote"])
+        self.assertNotIn("桂枝汤", answer["citations"][0]["evidence_quote"])
+
+    def test_unknown_explicit_formula_source_results_are_prioritized_and_visible(self) -> None:
+        unrelated = result("普通课程介绍。", paragraph_id="p-unrelated", page=1)
+        matching = result(
+            "背景说明" * 80 + "。白虎加人参汤用于本段讨论。",
+            paragraph_id="p-matching",
+            page=2,
+        )
+
+        answer = pdf_vector.synthesize_pdf_rag_answer(
+            "白虎加人参汤出处", [unrelated, matching]
+        )
+
+        self.assertEqual(answer["citations"][0]["paragraph_id"], "p-matching")
+        self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
+
     def test_citation_uses_valid_later_anchor_span_after_product_mention(self) -> None:
         cases = (
             ("桂枝汤出处", "桂枝汤圆上市", "桂枝汤主之"),
@@ -520,9 +546,9 @@ class AnswerQualityTests(unittest.TestCase):
         paragraph = (
             "桂枝汤圆上市。"
             + "背景说明" * 70
-            + "桂枝汤主之"
+            + "。桂枝汤主之。"
             + "补充材料" * 70
-            + "麻黄汤主之。"
+            + "。麻黄汤主之。"
         )
 
         answer = pdf_vector.synthesize_pdf_rag_answer(query, [result(paragraph)])
