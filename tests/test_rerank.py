@@ -13,6 +13,7 @@ from nihaisha_kg.rerank import (
     MAX_RERANK_DOCUMENT_CHARS,
     MAX_RERANK_QUERY_CHARS,
     MAX_SANITIZER_INPUT_CHARS,
+    MAX_SANITIZER_SECRET_GUARD_CHARS,
     SiliconFlowReranker,
     normalize_rerank_outcome_results,
     normalize_rerank_results,
@@ -179,7 +180,29 @@ class RerankTests(unittest.TestCase):
         multiline = sanitize_rerank_error(
             f"Auth\x9b31orization: Basic {credential}\r\nnext-line: retained"
         )
+        self.assertTrue(multiline.startswith("[REDACTED]"))
         self.assertIn("next-line: retained", multiline)
+
+        benign = sanitize_rerank_error(
+            "basic diagnostic information retained\ndigest mismatch retained"
+        )
+        self.assertIn("basic diagnostic information retained", benign)
+        self.assertIn("digest mismatch retained", benign)
+
+    def test_unsafe_control_lines_fail_closed_without_consuming_next_line(self) -> None:
+        messages = (
+            "diagnostic\x1b[31m text\r\nnext-line: retained",
+            "diagnostic\x9b31m text\nnext-line: retained",
+            "diagnostic\x00 text\rnext-line: retained",
+            "Auth\x9b31orization: Basic credential-sentinel\nnext-line: retained",
+            "Auth\x1b[31orization: Digest credential-sentinel\nnext-line: retained",
+            "\x1bAuthorization: Bearer credential-sentinel\nnext-line: retained",
+        )
+        for message in messages:
+            sanitized = sanitize_rerank_error(message)
+            self.assertTrue(sanitized.startswith("[REDACTED]"))
+            self.assertIn("next-line: retained", sanitized)
+            self.assertFalse("credential-sentinel" in sanitized)
 
     def test_known_keys_are_replaced_before_input_boundary_processing(self) -> None:
         known_key = "known-boundary-alpha-beta-gamma-delta-omega"
@@ -210,6 +233,59 @@ class RerankTests(unittest.TestCase):
                 api_key=shorter_key,
             )
         self.assertFalse("gamma-delta-omega" in sanitized)
+
+        max_guard_key = "k" * MAX_SANITIZER_SECRET_GUARD_CHARS
+        boundary_message = (
+            "x" * (MAX_SANITIZER_INPUT_CHARS - MAX_SANITIZER_SECRET_GUARD_CHARS // 2)
+            + max_guard_key
+            + "ignored-tail"
+        )
+        sanitized = sanitize_rerank_error(
+            boundary_message,
+            api_key=max_guard_key,
+            max_chars=MAX_SANITIZER_INPUT_CHARS + 100,
+        )
+        self.assertFalse("k" * 32 in sanitized)
+
+        marker_boundary = sanitize_rerank_error(
+            "x" * (MAX_SANITIZER_INPUT_CHARS - 1) + max_guard_key,
+            api_key=max_guard_key,
+            max_chars=MAX_SANITIZER_INPUT_CHARS + 100,
+        )
+        self.assertTrue(marker_boundary.endswith("[REDACTED]"))
+
+        oversized_key = "z" * (MAX_SANITIZER_SECRET_GUARD_CHARS + 1)
+        self.assertEqual(
+            sanitize_rerank_error("public diagnostics", api_key=oversized_key),
+            "[REDACTED]",
+        )
+        self.assertLessEqual(
+            len(
+                sanitize_rerank_error(
+                    "public diagnostics",
+                    api_key=oversized_key,
+                    max_chars=4,
+                )
+            ),
+            4,
+        )
+
+    def test_sanitizer_uses_builtin_bounded_slice_for_huge_string_subclasses(self) -> None:
+        class HostileString(str):
+            def __getitem__(self, _key: object) -> object:
+                raise AssertionError("overridden slicing must not run")
+
+            def replace(self, *_args: object, **_kwargs: object) -> str:
+                raise AssertionError("overridden replace must not run")
+
+            def __str__(self) -> str:
+                raise AssertionError("full conversion must not run")
+
+        message = HostileString("safe-prefix " + "x" * 5_000_000)
+        sanitized = sanitize_rerank_error(message, max_chars=80)
+
+        self.assertLessEqual(len(sanitized), 80)
+        self.assertTrue(sanitized.startswith("safe-prefix"))
 
     def test_sanitizer_is_idempotent_for_generic_secret_fields(self) -> None:
         credential = "credential-sentinel"

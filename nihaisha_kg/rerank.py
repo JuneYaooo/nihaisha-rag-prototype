@@ -17,6 +17,7 @@ PUBLIC_RERANK_MODEL_MAX_CHARS = 120
 PUBLIC_RERANK_FEATURE_MAX_CHARS = 80
 PUBLIC_RERANK_ERROR_MAX_CHARS = 240
 MAX_SANITIZER_INPUT_CHARS = 16_384
+MAX_SANITIZER_SECRET_GUARD_CHARS = 512
 
 
 class _RerankResponseError(ValueError):
@@ -29,13 +30,6 @@ def sanitize_rerank_error(
     api_key: str | None = None,
     max_chars: int = PUBLIC_RERANK_ERROR_MAX_CHARS,
 ) -> str:
-    if type(error) is str:
-        raw_message = error
-    else:
-        try:
-            raw_message = str(error)
-        except Exception:
-            raw_message = f"<{type(error).__name__}>"
     known_secrets = sorted(
         (
             secret
@@ -45,32 +39,43 @@ def sanitize_rerank_error(
         key=str.__len__,
         reverse=True,
     )
+    if any(str.__len__(secret) > MAX_SANITIZER_SECRET_GUARD_CHARS for secret in known_secrets):
+        return "[REDACTED]"[:max_chars] if max_chars > 0 else ""
+    raw_window_chars = MAX_SANITIZER_INPUT_CHARS + max(
+        (str.__len__(secret) for secret in known_secrets),
+        default=0,
+    )
+    if isinstance(error, str):
+        try:
+            raw_message = str.__getitem__(error, slice(0, raw_window_chars))
+        except Exception:
+            raw_message = f"<{type(error).__name__}>"
+    else:
+        try:
+            rendered = str(error)
+        except Exception:
+            rendered = f"<{type(error).__name__}>"
+        raw_message = rendered[:raw_window_chars]
     for secret in known_secrets:
         raw_message = raw_message.replace(secret, "[REDACTED]")
-    raw_message = raw_message[: MAX_SANITIZER_INPUT_CHARS + len("[REDACTED]")]
-    raw_message = re.sub(
-        r"(?:\x1b\]|\x9d)[^\x07\x9c\x1b\r\n]*(?:\x07|\x9c|\x1b\\)",
-        "",
-        raw_message,
-    )
-    raw_message = re.sub(
-        r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x9c\x1b\r\n]*(?:\x9c|\x1b\\)",
-        "",
-        raw_message,
-    )
-    raw_message = re.sub(r"(?:\x1b\]|\x9d)[^\r\n]*", "", raw_message)
-    raw_message = re.sub(
-        r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\r\n]*",
-        "",
-        raw_message,
-    )
-    raw_message = re.sub(
-        r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]",
-        "",
-        raw_message,
-    )
-    raw_message = re.sub(r"\x1b[@-_]?", "", raw_message)
-    raw_message = re.sub(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", raw_message)
+    if len(raw_message) > MAX_SANITIZER_INPUT_CHARS:
+        marker = "[REDACTED]"
+        marker_start = raw_message.rfind(
+            marker,
+            max(0, MAX_SANITIZER_INPUT_CHARS - len(marker) + 1),
+            min(len(raw_message), MAX_SANITIZER_INPUT_CHARS + len(marker)),
+        )
+        if marker_start >= 0 and marker_start < MAX_SANITIZER_INPUT_CHARS:
+            raw_message = raw_message[:marker_start] + marker
+        else:
+            raw_message = raw_message[:MAX_SANITIZER_INPUT_CHARS]
+
+    unsafe_control = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+    physical_parts = re.split(r"(\r\n|\r|\n)", raw_message)
+    for index in range(0, len(physical_parts), 2):
+        if unsafe_control.search(physical_parts[index]):
+            physical_parts[index] = "[REDACTED]"
+    raw_message = "".join(physical_parts)
     raw_message = re.sub(
         r'''(?ix)
         (?<![A-Za-z0-9_-])
@@ -78,17 +83,6 @@ def sanitize_rerank_error(
         [^\r\n]+
         ''',
         r"\g<prefix>[REDACTED]",
-        raw_message,
-    )
-    raw_message = re.sub(
-        r'''(?ix)
-        (?<![A-Za-z0-9])
-        (?P<scheme>basic|digest|bearer)
-        [ \t]+
-        (?!\[REDACTED\])
-        [^\r\n]+
-        ''',
-        r"\g<scheme> [REDACTED]",
         raw_message,
     )
     message = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", raw_message)
