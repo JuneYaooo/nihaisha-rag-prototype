@@ -37,11 +37,11 @@ Trace allowlists diagnostics; it does not copy provider credentials, headers, en
 
 ## Evidence policy
 
-1. Cite only retrieved PDF original paragraphs. If evidence is insufficient, say so; never fill from memory. The current SQLite has no structural `evidence_layer` column.
-2. All 11 PDFs, including `黄帝内经原文和翻译.pdf`, currently form one legacy bundled corpus. Runtime synthesis cannot yet structurally enforce `course_primary` versus `classic_primary`; phase-two builder migration will classify documents.
+1. Cite only retrieved PDF original paragraphs. If evidence is insufficient, say so; never fill from memory. The current SQLite stores document `source_layer`, paragraph-level evidence, candidate entities and candidate relations.
+2. Ten course documents are classified `course_primary`; `黄帝内经原文和翻译.pdf` is classified `classic_primary` as a candidate document. This classification is structural provenance, not edition verification or expert review.
 3. `derived` triples, guide nodes, expansions, flows, and follow-ups only navigate to originals; never cite them standalone or assert their subject/object as facts or formula names. Follow-ups must arise from the query and retrieved evidence, not a fixed checklist.
 4. This runtime has no external retrieval. It may retrieve classical material already present in the legacy bundle, but a separately versioned and verified authoritative classic layer is not implemented. Never reconstruct an absent ancient quotation from model memory.
-5. `classic_primary` and `reference_secondary` are future versioned layers. User-supplied or explicitly authorized outside research must be labeled “external / not retrieved from bundled DB,” verified and cited separately, without bundled authority.
+5. The current `classic_primary` candidate is not yet independently version-verified, and `reference_secondary` remains future work. User-supplied or explicitly authorized outside research must be labeled “external / not retrieved from bundled DB,” verified and cited separately, without bundled authority.
 6. Cite lecture claims and classical originals separately; never turn a paraphrase into an ancient quote.
 
 Use the separate `nihaisha-rag-builder` repository/Skill (often `../nihaisha-rag-builder`, or configured path) for incremental PDFs. Stage, audit, validate, and atomically publish the full asset set; runtime must not mutate production DB.

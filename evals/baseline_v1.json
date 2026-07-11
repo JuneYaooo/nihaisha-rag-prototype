@@ -7,7 +7,7 @@
     "mode": "hybrid",
     "limit": 10,
     "reranker": "none",
-    "code_commit": "e1b3a037e6d870bd1a88b070e7228693149ffb42",
+    "code_commit": "25b0b391bf17cf5ce9fe916fb4bb628b8ac50911",
     "embedding": {
       "provider": "SiliconFlow",
       "model": "BAAI/bge-m3",
@@ -16,7 +16,7 @@
     },
     "artifacts": {
       "golden_sha256": "b415d6cfa1aafc951671a44277e5ff103bd46c05b98ac35fe804d34062a57479",
-      "db_lfs_oid_sha256": "29e38eb8b60f2793d7a4b926ec08a261b11873b7a45374edc10c1348dfa53548",
+      "db_lfs_oid_sha256": "2e3e4cdb1dfdeb5c6cce29e9723a47633269dff49d4cd9ad26cda9ca7a1a9259",
       "faiss_lfs_oid_sha256": "18d0bfd9ba247903d4ab75484443783e9c6cfe4ce7067948f74a5ea4b38cf412",
       "vector_ids_sha256": "89b86a26c54a04ee1682cabd806911d95d91136f262a09cbb31224fba8d30470"
     },

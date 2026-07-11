@@ -101,5 +101,15 @@
   "faiss_index": "vectors.faiss",
   "faiss_ids": "vector_ids.jsonl",
   "faiss_vectors": 159286,
-  "faiss_dim": 1024
+  "faiss_dim": 1024,
+  "knowledge_schema_version": 1,
+  "knowledge_migration_version": "knowledge-structure-v1",
+  "knowledge_structure_report": "knowledge_structure_report.json",
+  "knowledge_structure_counts": {
+    "documents": 11,
+    "evidence_records": 5375,
+    "entities": 750,
+    "entity_aliases": 4859,
+    "relations": 7429
+  }
 }

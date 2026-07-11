@@ -1608,10 +1608,12 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(text_results, original_text)
 
     def test_synthesize_answer_aggregates_dosage_evidence_with_citations(self) -> None:
+        private = synthetic_private_values()
+        private_source = rf"{private['windows_root']}\仲景心法.pdf"
         results = [
             {
                 "paragraph_id": "p-a",
-                "source_path": r"C:\Users\alice\private\仲景心法.pdf",
+                "source_path": private_source,
                 "title": "仲景心法 p20",
                 "page_start": 20,
                 "page_end": 20,
@@ -1623,7 +1625,7 @@ class PdfVectorTests(unittest.TestCase):
                         "predicate": "换算与剂量原则",
                         "object": "3.75克；5克",
                         "evidence_quote": "倪师在南宁讲一钱等于3.75克，人纪教程是一钱约等于5克。",
-                        "source_path": r"C:\Users\alice\private\仲景心法.pdf",
+                        "source_path": private_source,
                     }
                 ],
             },

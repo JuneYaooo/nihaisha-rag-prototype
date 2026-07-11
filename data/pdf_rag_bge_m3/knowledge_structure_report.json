@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "migration_version": "knowledge-structure-v1",
+  "counts": {
+    "documents": 11,
+    "evidence_records": 5375,
+    "entities": 750,
+    "entity_aliases": 4859,
+    "relations": 7429
+  },
+  "rejected_candidates": 3007,
+  "orphan_entities": 0,
+  "relation_evidence_coverage": 1.0,
+  "relation_types": {
+    "differentiates_from": 273,
+    "indicates_pattern": 857,
+    "supported_by": 6297,
+    "uses_method": 2
+  },
+  "review_statuses": {
+    "needs_review": 7429
+  }
+}

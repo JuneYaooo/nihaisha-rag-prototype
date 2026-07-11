@@ -90,12 +90,14 @@ python3 -m nihaisha_kg evaluate --cases evals/golden_v1.jsonl --mode hybrid --li
 
 | 层级 | 当前状态 | 用法 |
 | --- | --- | --- |
-| `course_primary` | 运行时策略，尚无结构化字段 | 当前运行时答案以检索到的 PDF 原文段落、文件名、页码和摘录为主证据 |
-| `classic_primary` | 尚未实现独立版本化层 | 未来保存经版本核验的权威古籍原文，并与课程转述分别引用 |
+| `course_primary` | 已有结构化文档层 | 10 份课程讲义、同步文稿和教程；答案仍以 PDF 原文段落为主证据 |
+| `classic_primary` | 已有 1 份候选文档层 | 当前登记《黄帝内经原文和翻译》；尚未完成版本校勘与专家审核 |
 | `reference_secondary` | 未来入库，权威级别较低 | 学术研究、参考书和网页材料，只作补充 |
-| `derived` | 已有派生数据但无 `evidence_layer` 字段 | 图谱三元组、guide nodes、查询扩展仅用于导航；答案合成不把其 subject/object 当作事实或方名 |
+| `derived` | 已有候选实体和关系 | 仅用于导航；所有迁移关系当前均为 `needs_review`，不能独立作为事实依据 |
 
-当前 SQLite 没有结构化 `evidence_layer` 列；11 份 PDF（包括 `黄帝内经原文和翻译.pdf`）仍是同一个 legacy bundled corpus，因此运行时目前不能从结构上强制区分 `course_primary` 与 `classic_primary`。答案权威来自检索到的 PDF 原文段落，而不是派生图谱字段；但这不等于库中完全没有古籍原文或翻译材料。尚未实现的是**单独版本化、核验并可结构化识别的权威古籍层**。第二阶段 builder migration 将按文档分类并写入证据层。
+当前 SQLite 已增加 `documents`、`evidence_records`、`entities`、`entity_aliases` 和 `relations`。5,375 个原始段落均有证据记录和前后文链接；候选关系必须回到原始段落。迁移数据仍来自规则抽取，全部标记为 `needs_review`，所以结构化不等于已经完整、正确或专家审核。答案权威继续来自检索到的 PDF 原文段落，而不是候选关系字段。
+
+JSON citation 同时返回简短 `evidence_quote` 和完整 `paragraph_text`；有上下文 ID 时还返回 `previous_evidence_id`、`next_evidence_id`，供调用方展开相邻段落。`knowledge_relations(db_path, entity_name)` 可只读查询实体关系，并返回来源层、原文、定位、置信度、抽取器版本和审核状态。
 
 当前运行时没有外部网页检索路径。原文未在 bundled corpus 中检索到时，绝不能用模型记忆补写。只有当用户另行提供外部来源，或明确授权在本运行时之外研究时，才可把所得材料标为“外部材料（本库未检索）”，单独核验和引用；它不能共用 bundled citation 编号或获得 PDF 原文段落的证据权威。
 

@@ -12,7 +12,7 @@ Builder 的生产流程必须是：
 2. 在新的 staging 目录构建完整候选集，不修改已发布资产。
 3. 审计 OCR、页码、段落与 ID 稳定性、重复文档、embedding 模型/维度、知识抽取版本和来源路径。
 4. 验证全文/知识/向量检索、golden evaluation、FAISS 映射、自检和隐私扫描。
-5. 将同一代的 `rag.sqlite`、`manifest.json`、`vectors.faiss`、`vector_ids.jsonl` 作为**完整资产集**原子发布；禁止混用不同代文件。
+5. 将同一代的 `rag.sqlite`、`manifest.json`、`vectors.faiss`、`vector_ids.jsonl` 和 `knowledge_structure_report.json` 作为**完整资产集**原子发布；禁止混用不同代文件。
 6. 保留上一代资产以便回滚，发布后再次运行 runtime `doctor` 和代表性查询。
 
 解析、chunking、embedding 或抽取规则变化时应完整重建候选集。窄幅增量也必须重新验证既有 ID、向量规格、FTS/知识索引和 FAISS 一致性；失败即丢弃 staging，不在生产库上修补。
@@ -33,6 +33,12 @@ python3 -m nihaisha_kg build-faiss --db <scratch-root>/rag-candidate/rag.sqlite
 
 Scratch/traces 可能包含课程正文或内部路径，必须留在受控环境且不得提交。生产构建请回到 builder 工作流。
 
+## 知识结构迁移
+
+可移植资产完成后，在 builder 中运行 `scripts/migrate_knowledge_structure.py` 生成独立 staging。迁移器建立文档层、逐段证据、规范实体、别名和类型化关系，并生成 `knowledge_structure_report.json`。旧知识单元只有在证据摘录逐字存在于原始段落且主体满足基本结构要求时才进入候选关系；所有迁移关系均为 `needs_review`，不得宣称已经专家审核。
+
+质量报告至少核对文档、证据、实体、别名、关系、拒绝候选、孤立实体、关系证据覆盖率、谓词分布和审核状态。Runtime 只读这些结构，不在生产 SQLite 中补写或提升审核状态。
+
 ## 发布校验
 
 - 运行 builder 全套测试、编译、质量评测、资产哈希与 manifest schema 校验。
@@ -41,6 +47,6 @@ Scratch/traces 可能包含课程正文或内部路径，必须留在受控环�
 - 扫描凭据、环境转储、绝对 POSIX/Windows 路径和私密来源信息。
 - 在 runtime 安装 `.[runtime]`，运行 `python3 -m nihaisha_kg doctor`、完整测试和代表性 JSON 查询。
 - 用 `git lfs ls-files` 检查 `rag.sqlite`、`vectors.faiss`；暂存后用 `git cat-file -s :<path>` 确认 Git 对象是小型 LFS pointer。
-- 确认四项完整资产来自同一 staging generation，且 incoming、scratch、trace、WAL/SHM 和 `.env` 未进入提交。
+- 确认五项完整资产来自同一 staging generation，且 incoming、scratch、trace、WAL/SHM 和 `.env` 未进入提交。
 
 LFS 上传或任一校验失败时不得发布部分资产。不要提交真实 API key。

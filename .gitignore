@@ -26,3 +26,4 @@ data/pdf_rag_bge_m3/*
 !data/pdf_rag_bge_m3/manifest.json
 !data/pdf_rag_bge_m3/vectors.faiss
 !data/pdf_rag_bge_m3/vector_ids.jsonl
+!data/pdf_rag_bge_m3/knowledge_structure_report.json
