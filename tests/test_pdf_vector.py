@@ -136,12 +136,65 @@ class PdfVectorTests(unittest.TestCase):
             "course/pdfs/针灸.pdf",
         )
 
+    def test_public_source_path_discards_uri_secrets_and_sanitizes_basename(self) -> None:
+        sentinel = "URI_SECRET_SENTINEL"
+        cases = {
+            f"https://alice:{sentinel}@private.example:8443": "pdfs/source.pdf",
+            f"https://alice:{sentinel}@private.example/course/伤寒论.pdf?sig={sentinel}#{sentinel}":
+                "pdfs/伤寒论.pdf",
+            f"s3://{sentinel}-bucket/private/金匮.pdf?token={sentinel}": "pdfs/金匮.pdf",
+            "file:///Users/alice/private/针灸.pdf": "pdfs/针灸.pdf",
+            "file:C:/Users/alice/private/本草.pdf": "pdfs/本草.pdf",
+            "https://example.test/course/%E9%BB%84%E5%B8%9D%E5%86%85%E7%BB%8F.pdf":
+                "pdfs/黄帝内经.pdf",
+            "https://example.test/course/%2E%2E%2Fodd%5Cname.pdf": "pdfs/odd_name.pdf",
+            "https://example.test/course/%252E%252E%252Fdouble.pdf": "pdfs/double.pdf",
+            "https://example.test/course/%00%1Fcontrol.pdf": "pdfs/control.pdf",
+            f"https://example.test/course/?signed={sentinel}#{sentinel}": "pdfs/source.pdf",
+        }
+
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                public = pdf_vector.public_source_path(source)
+                self.assertEqual(public, expected)
+                self.assertNotIn(sentinel, public)
+                self.assertNotRegex(public, r"[?#\x00-\x1f\x7f]")
+
+    def test_public_source_path_rejects_encoded_unsafe_relative_components(self) -> None:
+        unsafe = (
+            "safe/%2e%2e/private.pdf",
+            "safe/%2Fetc/private.pdf",
+            "safe/%5Cserver/private.pdf",
+            "safe/%00hidden/private.pdf",
+            "safe/%3Ftoken/private.pdf",
+            "safe/%252e%252e/private.pdf",
+            "safe/%252Fetc/private.pdf",
+            "safe/%2500hidden/private.pdf",
+            "%43%3A/Users/alice/private.pdf",
+            "%66%69%6c%65%3A/Users/alice/private.pdf",
+            "%2543%253A/Users/alice/private.pdf",
+        )
+        for source in unsafe:
+            with self.subTest(source=source):
+                self.assertEqual(pdf_vector.public_source_path(source), "pdfs/private.pdf")
+
+        self.assertEqual(
+            pdf_vector.public_source_path(
+                "%E8%AF%BE%E7%A8%8B/pdfs/%E9%92%88%E7%81%B8.pdf"
+            ),
+            "课程/pdfs/针灸.pdf",
+        )
+
     def test_public_search_modes_and_answer_hide_absolute_source_roots(self) -> None:
-        private_root = r"C:\Users\alice\private"
+        sentinel = "URI_SECRET_SENTINEL"
+        private_source = (
+            f"https://alice:{sentinel}@private.example:8443/course/伤寒论.pdf"
+            f"?signature={sentinel}#{sentinel}"
+        )
         paragraph = ParsedParagraph(
             paragraph_id="p-public",
             doc_id="doc",
-            source_path=private_root + r"\伤寒论.pdf",
+            source_path=private_source,
             title="伤寒论 p42",
             page_start=42,
             page_end=42,
@@ -172,7 +225,9 @@ class PdfVectorTests(unittest.TestCase):
             self.assertTrue(results)
             self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in results))
         serialized = json.dumps(answer, ensure_ascii=False)
-        self.assertNotIn(private_root, serialized)
+        self.assertNotIn(sentinel, serialized)
+        self.assertNotIn("private.example", serialized)
+        self.assertNotIn("alice", serialized)
         self.assertTrue(all(row["source_path"] == "pdfs/伤寒论.pdf" for row in answer["results"]))
         self.assertTrue(
             all(citation["source_path"] == "pdfs/伤寒论.pdf" for citation in answer["citations"])
