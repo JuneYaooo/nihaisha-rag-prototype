@@ -524,6 +524,17 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertEqual(answer["citations"][0]["paragraph_id"], "p-matching")
         self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
 
+    def test_unknown_formula_like_source_topic_stays_neutral_and_prioritized(self) -> None:
+        unrelated = result("普通课程介绍。", paragraph_id="p-unrelated", page=1)
+        matching = result("本段逐字出现桂枝热汤这个词。", paragraph_id="p-topic", page=2)
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝热汤出处", [unrelated, matching])
+
+        self.assertEqual(answer["citations"][0]["paragraph_id"], "p-topic")
+        self.assertIn("桂枝热汤", answer["citations"][0]["evidence_quote"])
+        self.assertIn("关于", answer["answer"])
+        self.assertNotIn("方名", answer["answer"])
+
     def test_citation_uses_valid_later_anchor_span_after_product_mention(self) -> None:
         cases = (
             ("桂枝汤出处", "桂枝汤圆上市", "桂枝汤主之"),

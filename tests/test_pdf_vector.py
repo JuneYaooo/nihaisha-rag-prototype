@@ -2050,17 +2050,18 @@ class PdfVectorTests(unittest.TestCase):
         self.assertEqual(formulas, ["乌头桂枝汤", "桂枝汤"])
 
     def test_known_formula_evidence_suppresses_short_anchor_inside_unknown_compound(self) -> None:
-        self.assertEqual(known_formula_terms_in_evidence("通脉四逆汤主之。"), [])
+        self.assertEqual(known_formula_terms_in_evidence("通脉四逆汤主之。"), ["通脉四逆汤"])
         self.assertEqual(known_formula_terms_in_evidence("太阳中风桂枝汤。"), [])
         self.assertEqual(known_formula_terms_in_evidence("桂枝汤主之。"), ["桂枝汤"])
         self.assertEqual(known_formula_terms_in_evidence("用桂枝汤。"), ["桂枝汤"])
 
     def test_explicit_query_formula_terms_are_product_safe_and_bounded(self) -> None:
-        accepted = ("白虎加人参汤", "通脉四逆汤", "大陷胸汤", "小半夏汤")
+        confirmed = ("白虎加人参汤", "通脉四逆汤", "大陷胸汤", "小半夏汤")
         rejected = ("喝人参鸡汤", "人参鸡汤", "排骨汤", "酸辣汤", "因为桂枝汤")
-        for formula in accepted:
-            with self.subTest(accepted=formula):
-                self.assertEqual(explicit_query_formula_terms(f"{formula}出处"), [formula])
+        for formula in confirmed:
+            with self.subTest(confirmed=formula):
+                self.assertEqual(pdf_vector.reliable_formula_anchors(f"{formula}出处"), [formula])
+                self.assertEqual(explicit_query_formula_terms(f"{formula}出处"), [])
         for phrase in rejected:
             with self.subTest(rejected=phrase):
                 self.assertEqual(explicit_query_formula_terms(f"{phrase}出处"), [])
@@ -2075,7 +2076,7 @@ class PdfVectorTests(unittest.TestCase):
             "title": "课程 p1",
             "page_start": 1,
             "page_end": 1,
-            "text": "患者发热口渴，白虎加人参汤见于本段。",
+            "text": "患者发热口渴，白虎加人参汤见于本段。白虎汤主之。",
             "matched_knowledge_units": [
                 {"unit_type": "clinical_pattern", "evidence_quote": "患者发热口渴"}
             ],
@@ -2090,10 +2091,11 @@ class PdfVectorTests(unittest.TestCase):
             [{**result, "text": "患者咳嗽怕冷，通脉四逆汤见于旁文。"}],
         )
 
-        self.assertIn("白虎加人参汤", explicit["answer"])
+        self.assertIn("方名包括：白虎加人参汤。", explicit["answer"])
         self.assertIn("白虎加人参汤", explicit["citations"][0]["evidence_quote"])
         self.assertIn("方名包括：通脉四逆汤。", explicit_compound["answer"])
-        self.assertNotIn("四逆汤", generic["answer"])
+        self.assertIn("方名包括：通脉四逆汤。", generic["answer"])
+        self.assertNotIn("方名包括：四逆汤。", generic["answer"])
 
     def test_clinical_requested_compound_focuses_results_over_shorter_curated_formula(self) -> None:
         compound = {
@@ -2121,7 +2123,7 @@ class PdfVectorTests(unittest.TestCase):
         )
 
         self.assertIn("方名包括：白虎加人参汤。", answer["answer"])
-        self.assertNotIn("白虎汤、", answer["answer"])
+        self.assertNotIn("方名包括：白虎汤", answer["answer"])
         self.assertEqual([item["paragraph_id"] for item in answer["citations"]], ["p-compound"])
         self.assertIn("白虎加人参汤", answer["citations"][0]["evidence_quote"])
 
@@ -2140,6 +2142,31 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertIn("麻黄汤", answer["answer"])
         self.assertEqual(answer["citations"][0]["paragraph_id"], "p-direct-known")
+
+    def test_invented_literal_herb_soups_never_become_clinical_formula_authority(self) -> None:
+        invented = ("桂枝热汤", "生姜热汤", "麻黄热汤", "甘草红枣汤")
+        for formula in invented:
+            with self.subTest(formula=formula):
+                result = {
+                    "paragraph_id": f"p-{formula}",
+                    "source_path": "/tmp/课程.pdf",
+                    "title": "课程 p5",
+                    "page_start": 5,
+                    "page_end": 5,
+                    "text": f"患者下利恶心，饮食段落提到{formula}。",
+                    "matched_knowledge_units": [],
+                }
+                answer = synthesize_pdf_rag_answer(
+                    f"患者下利恶心，{formula}如何理解？", [result]
+                )
+                self.assertNotIn(f"方名包括：{formula}", answer["answer"])
+
+    def test_no_result_formula_like_source_queries_keep_medical_safety_without_assertion(self) -> None:
+        for query in ("大陷胸汤出处", "白虎加人参汤出处", "桂枝热汤出处"):
+            with self.subTest(query=query):
+                answer = synthesize_pdf_rag_answer(query, [])
+                self.assertIn(pdf_vector.FORMULA_DOSAGE_SAFETY_NOTICE, answer["safety_notice"])
+                self.assertIn("没有检索到足够可靠的原文证据", answer["answer"])
 
     def test_source_lookup_does_not_treat_embedded_short_formula_as_direct_evidence(self) -> None:
         longer = {

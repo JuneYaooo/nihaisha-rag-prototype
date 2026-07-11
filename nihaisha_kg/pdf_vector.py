@@ -250,7 +250,7 @@ KNOWN_FORMULA_ANCHORS = frozenset(
         "小建中汤", "十枣汤", "大柴胡汤", "小青龙汤", "大青龙汤", "吴茱萸汤",
         "当归四逆汤", "苓桂术甘汤", "茵陈蒿汤", "越婢汤", "旋覆代赭汤",
         "麦门冬汤", "木防己汤", "百合知母汤", "五苓散", "肾气丸", "麻子仁丸",
-        "乌头桂枝汤",
+        "乌头桂枝汤", "白虎加人参汤", "通脉四逆汤", "大陷胸汤", "小半夏汤",
     }
 )
 FORMULA_LEFT_QUERY_PREFIXES = ("请问", "关于", "查询", "和", "与", "、")
@@ -3893,15 +3893,13 @@ def citation_evidence_for_result(
     unit_quotes = verified_unit_evidence_quotes(result)
     paragraph = str(result.get("text", "")).strip()
     if intent == "clinical":
-        explicit_terms = explicit_query_formula_terms(query)
-        if explicit_terms:
+        formula_anchors = reliable_formula_anchors(query)
+        if formula_anchors:
             for quote in unit_quotes:
-                snippet = literal_term_evidence_snippet(quote, explicit_terms)
-                if snippet:
-                    return snippet
-            snippet = literal_term_evidence_snippet(paragraph, explicit_terms)
-            if snippet:
-                return snippet
+                if evidence_contains_source_anchors(quote, formula_anchors):
+                    return anchor_evidence_snippet(quote, formula_anchors)
+            if evidence_contains_source_anchors(paragraph, formula_anchors):
+                return anchor_evidence_snippet(paragraph, formula_anchors)
     if intent == "source_lookup":
         anchors = reliable_source_anchors(query)
         if anchors:
@@ -3994,11 +3992,17 @@ def filter_results_for_intent(
         ]
     elif intent == "clinical":
         query_formulas = reliable_formula_anchors(query)
-        explicit_focused = [
-            result for result in results if explicit_query_formulas_in_result(query, result)
-        ]
-        if explicit_focused:
-            return explicit_focused
+        if query_formulas:
+            formula_focused = [
+                result
+                for result in results
+                if any(
+                    evidence_contains_source_anchors(text, query_formulas)
+                    for text in source_primary_evidence_texts(result)
+                )
+            ]
+            if formula_focused:
+                return formula_focused
         query_clues = set(canonical_clinical_clues(query))
         clinical_filtered: list[dict[str, object]] = []
         for result in results:
@@ -4201,13 +4205,18 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
 
 
 def collect_formula_names(results: list[dict[str, object]], query: str = "") -> list[str]:
-    explicit_names = dedupe_keep_order(
+    query_formulas = reliable_formula_anchors(query)
+    grounded_query_formulas = [
         formula
-        for result in results
-        for formula in explicit_query_formulas_in_result(query, result)
-    )
-    if explicit_names:
-        return explicit_names
+        for formula in query_formulas
+        if any(
+            source_anchor_matches_evidence(formula, text)
+            for result in results
+            for text in source_primary_evidence_texts(result)
+        )
+    ]
+    if grounded_query_formulas:
+        return grounded_query_formulas
     names: list[str] = []
     for result in results:
         names.extend(known_formula_terms_in_evidence(primary_evidence_text(result)))
@@ -4257,7 +4266,10 @@ def synthesize_pdf_rag_answer(
             safety_notice = with_formula_dosage_safety(
                 "课程资料不能替代诊断；这里不直接给个人处方、剂量或治疗建议。"
             )
-        elif intent == "dosage" or (intent == "source_lookup" and reliable_formula_anchors(query)):
+        elif intent == "dosage" or (
+            intent == "source_lookup"
+            and (reliable_formula_anchors(query) or explicit_query_formula_terms(query))
+        ):
             safety_notice = with_formula_dosage_safety(
                 "这是课程资料整理和出处检索，不是个人用药剂量建议。"
             )
@@ -4290,7 +4302,9 @@ def synthesize_pdf_rag_answer(
             f"[{citation['index']}] {citation['evidence_quote']}" for citation in citations[:4]
         )
         answer = f"关于“{topic}”，当前检索到的原文位置是：{locations}。原文摘录：{excerpts}"
-        has_formula_content = bool(reliable_formula_anchors(query)) or any(
+        has_formula_content = bool(
+            reliable_formula_anchors(query) or explicit_query_formula_terms(query)
+        ) or any(
             known_formula_terms_in_evidence(text)
             for result in relevant_results
             for text in source_primary_evidence_texts(result)
