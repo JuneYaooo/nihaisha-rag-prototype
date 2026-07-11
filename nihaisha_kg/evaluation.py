@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 
-SUPPORTED_EVALUATION_MODES = frozenset({"hybrid", "vector", "text", "knowledge"})
+SUPPORTED_EVALUATION_MODES = frozenset({"hybrid", "vector", "text", "knowledge", "graph"})
 MAX_EVALUATION_CASES = 1_000
 MAX_EVALUATION_PARAGRAPH_ID_CHARS = 256
 MAX_EVALUATION_JSONL_LINE_BYTES = 1_048_576

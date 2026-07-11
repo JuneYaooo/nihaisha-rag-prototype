@@ -35,6 +35,7 @@ def fuse_ranked_channels(
     merge_fields = (
         "matched_units",
         "matched_knowledge_units",
+        "matched_graph_relations",
         "matched_text_terms",
         "unit_types",
     )
@@ -78,7 +79,7 @@ def fuse_ranked_channels(
                     list(current[field]),
                     list(result.get(field, [])),
                 )
-            for score_field in ("vector_score", "text_score", "knowledge_score"):
+            for score_field in ("vector_score", "text_score", "knowledge_score", "graph_score"):
                 if score_field in result:
                     current[score_field] = max(
                         float(current.get(score_field, 0.0)),

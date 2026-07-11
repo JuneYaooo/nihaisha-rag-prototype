@@ -2985,6 +2985,118 @@ class LocalVectorStore:
                 )
             return results
 
+    def search_graph_relations(
+        self,
+        query: str,
+        limit: int = 8,
+    ) -> list[dict[str, object]]:
+        """Navigate accepted entity relations back to their original paragraphs."""
+        validate_runtime_limit(limit, "limit", MAX_INTERNAL_SEARCH_LIMIT)
+        normalized_query = normalize_query_text(query)
+        entity_terms = dedupe_keep_order(
+            [
+                *reliable_formula_anchors(normalized_query),
+                *(term for term in SYMPTOM_TERMS if term in normalized_query),
+                *(term for term in ("一钱",) if term in normalized_query),
+            ]
+        )[:24]
+        if not entity_terms:
+            return []
+
+        with self.connect() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {
+                "documents", "evidence_records", "entities", "relations", "paragraphs"
+            }
+            if not required <= tables:
+                return []
+            placeholders = ",".join("?" for _ in entity_terms)
+            rows = conn.execute(
+                f"""
+                SELECT r.relation_id, r.predicate, r.literal_value, r.confidence,
+                       r.extractor_version, r.review_status, r.source_layer,
+                       e.entity_id, e.entity_type, e.canonical_name,
+                       ev.evidence_id, ev.previous_evidence_id, ev.next_evidence_id,
+                       p.*
+                FROM entities e
+                JOIN relations r ON r.subject_entity_id = e.entity_id
+                JOIN evidence_records ev ON ev.evidence_id = r.evidence_id
+                JOIN paragraphs p ON p.paragraph_id = ev.paragraph_id
+                WHERE e.normalized_key IN ({placeholders})
+                  AND r.review_status IN ('auto_accepted', 'reviewed')
+                ORDER BY CASE r.review_status WHEN 'reviewed' THEN 0 ELSE 1 END,
+                         r.confidence DESC, r.relation_id
+                LIMIT ?
+                """,
+                [*(normalize_whitespace(term).casefold() for term in entity_terms), limit * 8],
+            ).fetchall()
+
+            grouped: dict[str, dict[str, object]] = {}
+            for row in rows:
+                paragraph_id = str(row["paragraph_id"])
+                relation = {
+                    "relation_id": row["relation_id"],
+                    "entity_id": row["entity_id"],
+                    "entity_type": row["entity_type"],
+                    "entity_name": row["canonical_name"],
+                    "predicate": row["predicate"],
+                    "literal_value": row["literal_value"],
+                    "confidence": row["confidence"],
+                    "extractor_version": row["extractor_version"],
+                    "review_status": row["review_status"],
+                    "source_layer": row["source_layer"],
+                    "evidence_id": row["evidence_id"],
+                }
+                item = grouped.setdefault(
+                    paragraph_id,
+                    {
+                        "paragraph_id": paragraph_id,
+                        "doc_id": row["doc_id"],
+                        "source_path": public_source_path(row["source_path"]),
+                        "title": row["title"],
+                        "page_start": row["page_start"],
+                        "page_end": row["page_end"],
+                        "text": row["text"],
+                        "score": 0.0,
+                        "vector_score": 0.0,
+                        "text_score": 0.0,
+                        "knowledge_score": 0.0,
+                        "graph_score": 0.0,
+                        "retrieval_sources": ["graph"],
+                        "hit_count": 0,
+                        "unit_types": [],
+                        "matched_units": [],
+                        "matched_text_terms": [],
+                        "matched_knowledge_units": [],
+                        "matched_graph_relations": [],
+                        "previous_evidence_id": row["previous_evidence_id"] or "",
+                        "next_evidence_id": row["next_evidence_id"] or "",
+                    },
+                )
+                matched = item["matched_graph_relations"]
+                assert isinstance(matched, list)
+                matched.append(relation)
+                item["hit_count"] = len(matched)
+                item["graph_score"] = max(
+                    float(item["graph_score"]), float(row["confidence"])
+                )
+                item["score"] = item["graph_score"]
+
+        ranked = sorted(
+            grouped.values(),
+            key=lambda item: (
+                -len(item["matched_graph_relations"]),
+                -float(item["graph_score"]),
+                str(item["paragraph_id"]),
+            ),
+        )
+        return ranked[:limit]
+
     def search_hybrid(
         self,
         query: str,
@@ -3000,13 +3112,16 @@ class LocalVectorStore:
         vector_results = self.search_vector(query, limit=vector_limit, unit_limit=unit_limit)
         text_results = self.search_text(query, limit=text_channel_limit)
         knowledge_results = self.search_knowledge_units(query, limit=text_channel_limit)
+        graph_results = self.search_graph_relations(query, limit=text_channel_limit)
         return fuse_ranked_channels(
             {
+                "graph": graph_results,
                 "vector": vector_results,
                 "text": text_results,
                 "knowledge": knowledge_results,
             },
             limit=limit,
+            channel_weights={"graph": 0.35},
         )
 
     def search(
@@ -3024,6 +3139,8 @@ class LocalVectorStore:
             return self.search_text(query, limit=limit)
         if mode == "knowledge":
             return self.search_knowledge_units(query, limit=limit)
+        if mode == "graph":
+            return self.search_graph_relations(query, limit=limit)
         if mode == "hybrid":
             return self.search_hybrid(query, limit=limit, unit_limit=unit_limit)
         raise ValueError(f"unsupported search mode: {mode}")
@@ -4591,7 +4708,7 @@ def answer_pdf_rag(
     db_path = db_path.expanduser().resolve()
     if embedding_backend is not None:
         store = LocalVectorStore(db_path, embedding_backend=embedding_backend)
-    elif mode in {"text", "knowledge"}:
+    elif mode in {"text", "knowledge", "graph"}:
         store = LocalVectorStore(db_path)
     else:
         backend = create_embedding_backend_for_db(

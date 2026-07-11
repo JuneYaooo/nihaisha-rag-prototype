@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--cases", type=Path, default=DEFAULT_EVAL_CASES)
     evaluate.add_argument(
         "--mode",
-        choices=["hybrid", "vector", "text", "knowledge"],
+        choices=["hybrid", "vector", "text", "knowledge", "graph"],
         default="hybrid",
     )
     evaluate.add_argument("--limit", type=int, default=10)
@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("--limit", type=int, default=5)
     search.add_argument(
         "--mode",
-        choices=["hybrid", "vector", "text", "knowledge"],
+        choices=["hybrid", "vector", "text", "knowledge", "graph"],
         default="hybrid",
     )
     search.add_argument(
@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--limit", type=int, default=8)
     answer.add_argument(
         "--mode",
-        choices=["hybrid", "vector", "text", "knowledge"],
+        choices=["hybrid", "vector", "text", "knowledge", "graph"],
         default="hybrid",
     )
     answer.add_argument(
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "evaluate":
         try:
             cases = load_eval_cases(args.cases)
-            if args.mode in {"text", "knowledge"}:
+            if args.mode in {"text", "knowledge", "graph"}:
                 store = LocalVectorStore(args.db)
             else:
                 backend = create_embedding_backend_for_db(args.db)
@@ -340,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "search":
         try:
-            if args.mode in {"text", "knowledge"}:
+            if args.mode in {"text", "knowledge", "graph"}:
                 store = LocalVectorStore(args.db)
             else:
                 backend = create_embedding_backend_for_db(
