@@ -2330,6 +2330,9 @@ class PdfVectorTests(unittest.TestCase):
 
         self.assertEqual(selected[0]["paragraph_id"], "p-rich")
 
+    def test_clinical_diversity_selection_accepts_empty_filtered_results(self) -> None:
+        self.assertEqual(select_diverse_results([], limit=8, intent="clinical"), [])
+
     def test_answer_pdf_rag_runs_followup_search_for_diverse_dosage_evidence(self) -> None:
         seed = ParsedParagraph(
             paragraph_id="p-seed",

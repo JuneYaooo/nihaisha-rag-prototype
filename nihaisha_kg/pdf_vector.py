@@ -3735,7 +3735,7 @@ def select_diverse_results(
     limit: int,
     intent: str = "general",
 ) -> list[dict[str, object]]:
-    if limit <= 0:
+    if limit <= 0 or not results:
         return []
     if len(results) <= limit and intent != "clinical":
         return results[:limit]
