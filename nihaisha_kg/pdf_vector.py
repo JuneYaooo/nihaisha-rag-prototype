@@ -3193,12 +3193,22 @@ def evidence_contains_source_anchors(text: str, anchors: list[str]) -> bool:
     return all(anchor in validated for anchor in anchors)
 
 
+def verified_unit_evidence_quotes(result: dict[str, object]) -> list[str]:
+    paragraph = str(result.get("text", "")).strip()
+    normalized_paragraph = normalize_whitespace(normalize_query_text(paragraph))
+    if not normalized_paragraph:
+        return []
+    quotes: list[str] = []
+    for unit in result.get("matched_knowledge_units", []) or []:
+        quote = str(unit.get("evidence_quote", "")).strip()
+        normalized_quote = normalize_whitespace(normalize_query_text(quote))
+        if normalized_quote and normalized_quote in normalized_paragraph:
+            quotes.append(quote)
+    return dedupe_keep_order(quotes)
+
+
 def source_primary_evidence_texts(result: dict[str, object]) -> list[str]:
-    texts = [str(result.get("text", "")).strip()]
-    texts.extend(
-        str(unit.get("evidence_quote", "")).strip()
-        for unit in result.get("matched_knowledge_units", []) or []
-    )
+    texts = [str(result.get("text", "")).strip(), *verified_unit_evidence_quotes(result)]
     return [text for text in texts if text]
 
 
@@ -3782,19 +3792,14 @@ def citation_evidence_for_result(
         for sentence in split_sentences(str(result.get("text", ""))):
             if ("一钱" in sentence or "1钱" in sentence) and ("克" in sentence or "比例" in sentence):
                 evidence_parts.append(sentence)
-        for unit in result.get("matched_knowledge_units", []) or []:
-            quote = str(unit.get("evidence_quote", "")).strip()
+        for quote in verified_unit_evidence_quotes(result):
             if "一钱" in quote or "1钱" in quote or "克" in quote:
                 evidence_parts.append(quote)
         evidence = " ".join(dedupe_keep_order(evidence_parts))
         if evidence:
             return dosage_evidence_snippet(evidence)
 
-    unit_quotes = [
-        str(unit.get("evidence_quote", "")).strip()
-        for unit in result.get("matched_knowledge_units", []) or []
-        if str(unit.get("evidence_quote", "")).strip()
-    ]
+    unit_quotes = verified_unit_evidence_quotes(result)
     paragraph = str(result.get("text", "")).strip()
     if intent == "source_lookup":
         anchors = reliable_source_anchors(query)
@@ -3864,7 +3869,7 @@ def filter_results_for_intent(
     results: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     if intent == "dosage":
-        filtered = [result for result in results if is_dosage_relevant_result(result)]
+        return [result for result in results if is_dosage_relevant_result(result)]
     elif intent == "source_lookup":
         anchors = reliable_source_anchors(query)
         if not anchors:
@@ -3900,7 +3905,7 @@ def filter_results_for_intent(
 
 
 def is_dosage_relevant_result(result: dict[str, object]) -> bool:
-    text = result_evidence_text(result)
+    text = primary_evidence_text(result)
     has_anchor = "一钱" in text or "1钱" in text
     has_measure = bool(MEASURE_TERM_RE.search(text))
     has_context = any(term in text for term in ("剂量", "换算", "度量衡", "比例", "汉制", "今制"))
@@ -3910,10 +3915,7 @@ def is_dosage_relevant_result(result: dict[str, object]) -> bool:
         return True
     if "比例" in text and any(term in text for term in ("方", "汤", "剂量", "处方")):
         return True
-    return any(
-        unit.get("unit_type") == "dosage"
-        for unit in result.get("matched_knowledge_units", []) or []
-    )
+    return False
 
 
 def collect_matched_knowledge_units(results: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -4075,19 +4077,11 @@ def collect_gram_values(results: list[dict[str, object]]) -> list[str]:
         return ("一钱" in text or "1钱" in text) and "克" in text
 
     values: list[str] = []
-    for unit in collect_matched_knowledge_units(results):
-        if unit.get("unit_type") != "dosage":
-            continue
-        context = f"{unit.get('object', '')}\n{unit.get('evidence_quote', '')}"
-        if not is_conversion_context(context):
-            continue
-        values.extend(extract_conversion_values(str(unit.get("object", ""))))
-        values.extend(extract_conversion_values(str(unit.get("evidence_quote", ""))))
     for result in results:
-        text = str(result.get("text", ""))
-        for sentence in split_sentences(text):
-            if is_conversion_context(sentence):
-                values.extend(extract_conversion_values(sentence))
+        for text in source_primary_evidence_texts(result):
+            for sentence in split_sentences(text):
+                if is_conversion_context(sentence):
+                    values.extend(extract_conversion_values(sentence))
     return dedupe_keep_order(values)
 
 

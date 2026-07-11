@@ -422,8 +422,11 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertEqual(answer["citations"], [])
         self.assertNotIn("原文摘录", answer["answer"])
 
-    def test_primary_paragraph_or_quote_can_ground_derived_subject(self) -> None:
-        for paragraph, quote in (("桂枝汤主之。", ""), ("普通课程介绍。", "桂枝汤主之。")):
+    def test_primary_paragraph_or_contained_quote_can_ground_source_anchor(self) -> None:
+        for paragraph, quote in (
+            ("桂枝汤主之。", ""),
+            ("课程原文说：太阳中风，桂枝汤主之。", "太阳中风，桂枝汤主之。"),
+        ):
             with self.subTest(paragraph=paragraph, quote=quote):
                 evidence = result(paragraph)
                 evidence["matched_knowledge_units"] = [
@@ -432,6 +435,68 @@ class AnswerQualityTests(unittest.TestCase):
                 answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
                 self.assertTrue(answer["citations"])
                 self.assertIn("桂枝汤", answer["citations"][0]["evidence_quote"])
+
+    def test_uncontained_derived_quote_cannot_assert_or_cite_clinical_formula(self) -> None:
+        evidence = result("患者恶寒咳嗽、下利恶心，原文提醒仍需辨证。")
+        evidence["matched_knowledge_units"] = [
+            {
+                "unit_type": "formula_pattern",
+                "subject": "桂枝汤",
+                "object": "恶寒咳嗽",
+                "evidence_quote": "太阳中风，桂枝汤主之。",
+            }
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("患者恶寒咳嗽、下利恶心，开什么方？", [evidence])
+
+        self.assertNotIn("桂枝汤", answer["answer"])
+        self.assertTrue(answer["citations"])
+        self.assertNotIn("桂枝汤", answer["citations"][0]["evidence_quote"])
+
+    def test_blank_paragraph_with_derived_quote_is_insufficient_evidence(self) -> None:
+        evidence = result("")
+        evidence["matched_knowledge_units"] = [
+            {
+                "unit_type": "formula_pattern",
+                "subject": "桂枝汤",
+                "object": "太阳中风",
+                "evidence_quote": "太阳中风，桂枝汤主之。",
+            }
+        ]
+
+        for query in ("桂枝汤出处", "课程如何理解"):
+            with self.subTest(query=query):
+                answer = pdf_vector.synthesize_pdf_rag_answer(query, [evidence])
+                self.assertEqual(answer["citations"], [])
+                self.assertIn("没有检索到足够可靠的原文证据", answer["answer"])
+                self.assertNotIn("原文要点包括：。", answer["answer"])
+
+    def test_uncontained_derived_dosage_quote_cannot_make_unrelated_paragraph_evidence(self) -> None:
+        evidence = result("普通课程目录介绍。")
+        evidence["matched_knowledge_units"] = [
+            {
+                "unit_type": "dosage",
+                "subject": "一钱",
+                "object": "99克",
+                "evidence_quote": "一钱等于99克。",
+            }
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("古时候一钱是多少克？", [evidence])
+
+        self.assertEqual(answer["citations"], [])
+        self.assertIn("没有检索到足够可靠的原文证据", answer["answer"])
+        self.assertNotIn("99克", answer["answer"])
+
+    def test_source_citation_prefers_verified_contained_quote(self) -> None:
+        evidence = result("课程前言。太阳中风，桂枝汤主之。后续说明。")
+        evidence["matched_knowledge_units"] = [
+            {"evidence_quote": "太阳中风，桂枝汤主之。"}
+        ]
+
+        answer = pdf_vector.synthesize_pdf_rag_answer("桂枝汤出处", [evidence])
+
+        self.assertEqual(answer["citations"][0]["evidence_quote"], "太阳中风，桂枝汤主之。")
 
     def test_citation_uses_valid_later_anchor_span_after_product_mention(self) -> None:
         cases = (
